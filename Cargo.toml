@@ -3,7 +3,7 @@ members = [
     "crates/agentd",
     "crates/agentd-runner",
     "crates/agentd-scheduler",
-    "crates/agentd-mcp",
+    "crates/mcp-transport",
     "crates/forgejo-mcp",
 ]
 resolver = "2"
@@ -17,5 +17,5 @@ license = "Apache-2.0"
 [workspace.dependencies]
 agentd-runner = { path = "crates/agentd-runner" }
 agentd-scheduler = { path = "crates/agentd-scheduler" }
-agentd-mcp = { path = "crates/agentd-mcp" }
+mcp-transport = { path = "crates/mcp-transport" }
 forgejo-mcp = { path = "crates/forgejo-mcp" }
