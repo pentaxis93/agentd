@@ -25,3 +25,16 @@ Each landing PR must verify documentation and code remain aligned. Confirm READM
 
 ## Skill Locations
 Detailed cognitive and process skills live in `docs/skills/`. The foundational skill is `docs/skills/ground.md` (need-first design and verified constraints discipline). Add future skills in this directory and keep `AGENTS.md` as the thin routing layer.
+
+## Skill Layers
+agentd supports two project-level skill layers:
+
+- Public project skills: tracked in this repository under `.agents/skills/<skill-name>/SKILL.md`. These are shared team tooling.
+- Personal skills overlay: optional local skills installed into `.agents/skills/` on a developer machine. Personal skill content is developer-owned and must not be committed in this repository.
+
+### Personal Overlay Policy
+- The personal overlay mechanism is a supported public project feature.
+- Personal skill names, personal repo URLs, and personal filesystem paths must not appear in committed files.
+- On name collision, personal overlay skills take precedence over project skills by design.
+- Personal overlay paths must be ignored via local-only git excludes (for example `.git/info/exclude`), not `.gitignore`.
+- Contributor setup and verification steps are documented in `docs/skills/overlay.md`.
