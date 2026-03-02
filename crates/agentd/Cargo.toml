@@ -1,0 +1,12 @@
+[package]
+name = "agentd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agentd-runner.workspace = true
+agentd-scheduler.workspace = true
+agentd-mcp.workspace = true
+forgejo-mcp.workspace = true
