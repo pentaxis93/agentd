@@ -13,7 +13,7 @@ agentd is not:
 - **A cloud platform** — there is no hosted service; you run it
 - **An AI model** — it orchestrates agent sessions, it does not perform inference
 - **A framework for building agents** — it provides the runtime environment agents execute in, not an SDK for writing agent logic
-- **Opinionated about tool domains** — domain-specific capabilities (code forges, databases, APIs) live in plugins
+- **Opinionated about tool domains** — domain-specific capabilities live in plugins
 
 ## 2. Agent Capability Needs
 
