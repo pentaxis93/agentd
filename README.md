@@ -16,6 +16,15 @@ The system is organized as a Rust workspace with focused crates for runtime, sch
 
 Coming soon.
 
+## Developer Tooling: Skills
+
+agentd supports project-level skills with two layers:
+
+- Shared public skills tracked in this repository at `.agents/skills/`.
+- Optional personal skills overlay installed locally at project level and kept untracked.
+
+See `docs/skills/overlay.md` for the personal overlay workflow, collision policy, and git-clean verification steps.
+
 ## License
 
 Licensed under the terms in [LICENSE](LICENSE).
