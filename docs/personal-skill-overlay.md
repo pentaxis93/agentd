@@ -1,6 +1,6 @@
 # Personal Skills Overlay
 
-This document defines the supported way to combine shared public skills with personal developer skills at project scope.
+How to combine shared public skills with personal developer skills at project scope.
 
 ## Goal
 
