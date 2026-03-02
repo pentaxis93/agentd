@@ -8,5 +8,5 @@ license.workspace = true
 [dependencies]
 agentd-runner.workspace = true
 agentd-scheduler.workspace = true
-agentd-mcp.workspace = true
+mcp-transport.workspace = true
 forgejo-mcp.workspace = true
