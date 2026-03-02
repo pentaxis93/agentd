@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/agentd",
+    "crates/agentd-runner",
+    "crates/agentd-scheduler",
+    "crates/agentd-mcp",
+    "crates/forgejo-mcp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+agentd-runner = { path = "crates/agentd-runner" }
+agentd-scheduler = { path = "crates/agentd-scheduler" }
+agentd-mcp = { path = "crates/agentd-mcp" }
+forgejo-mcp = { path = "crates/forgejo-mcp" }
