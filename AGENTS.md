@@ -11,7 +11,7 @@ agentd uses a workspace-and-plugin shape: the `agentd` binary crate composes foc
 This workflow is always in effect for contributions to this repository and is not optional.
 
 ### Ground Before Designing
-For any new module, API surface, protocol, or data structure, define what capability must exist when the change is complete before inspecting existing implementation patterns. State required outcomes first, then derive constraints from what must be true for those outcomes to hold. Separate actual constraints from inherited assumptions and challenge assumptions unless they are verified by requirements, interfaces, or tests. Compare against existing approaches only after a need-first design exists. Reference: `.agents/skills/ground/SKILL.md`.
+For any new module, API surface, protocol, or data structure, define what capability must exist when the change is complete before inspecting existing implementation patterns. State required outcomes first, then derive constraints from what must be true for those outcomes to hold. Separate actual constraints from inherited assumptions and challenge assumptions unless they are verified by requirements, interfaces, or tests. Compare against existing approaches only after a need-first design exists. Reference: `skills/ground/SKILL.md`.
 
 ### BDD First
 Every change must follow this sequence: behavioral spec -> test -> implementation -> verification. Define done as observable behavior before coding. Write or update tests that fail without the change and pass when behavior is correct. Implement only what is necessary to satisfy the behavioral contract. No PR is complete without behavioral coverage for the change.
