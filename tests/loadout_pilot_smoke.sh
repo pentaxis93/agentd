@@ -50,7 +50,14 @@ OPENCODE_LIST="$(list_names ".opencode/skills")"
   exit 1
 }
 
-sed -i 's/^skills = \[.*\]$/skills = []/' ".loadout/agentd.toml"
+awk '
+  BEGIN { in_global = 0 }
+  /^\[global\]$/ { in_global = 1; print; next }
+  /^\[/ { in_global = 0 }
+  in_global && /^skills = / { print "skills = []"; next }
+  { print }
+' ".loadout/agentd.toml" > ".loadout/agentd.toml.tmp"
+mv ".loadout/agentd.toml.tmp" ".loadout/agentd.toml"
 
 LOADOUT_CONFIG="$PROJECT/.loadout/agentd.toml" loadout install
 LOADOUT_CONFIG="$PROJECT/.loadout/agentd.toml" loadout clean
