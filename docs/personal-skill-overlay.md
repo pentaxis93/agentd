@@ -1,64 +1,97 @@
 # Personal Skills Overlay
 
-How to combine shared public skills with personal developer skills at project scope.
+How to layer personal skills on top of project skills using `loadout`.
 
 ## Goal
 
-- Keep shared project skills committed with the repository.
-- Allow each developer to add personal skills locally at project level.
-- Keep personal skill content and identity details out of committed files.
+- Keep shared project skills committed at `skills/`.
+- Allow each developer to layer private personal skills locally.
+- Keep personal skill names, URLs, and paths out of committed files.
 
-## Directory Contract
+## Project Pilot Contract
 
-- Public skills (tracked): `.agents/skills/<public-skill>/SKILL.md`
-- Personal overlay (local only): `.agents/skills/<personal-skill>/`
+- Canonical tracked source in this repo: `skills/<skill>/SKILL.md`
+- Project loadout config: `.loadout/agentd.toml`
+- Project default sources are ordered for precedence:
+  1. `../../agentd-personal-skills`
+  2. `../../agents/skills/workflow/issue-craft`
+  3. `../../agents/skills/workflow/planning`
+  4. `../skills`
+- Project default enabled skills: `ground`, `land`, `issue-craft`, `planning`
+- Loadout-managed project targets:
+  - `.agents/skills` (Codex)
+  - `.claude/skills` (Claude Code)
+  - `.opencode/skills` (OpenCode)
 
-## Installation Pattern (Personal Overlay)
-
-1. Store personal skills in a personal location (for example a personal repo clone).
-2. Install them into this project as symlinks under `.agents/skills/`.
-3. Add personal overlay paths to local-only excludes in `.git/info/exclude`.
-
-Example local installation pattern:
+Install project skills:
 
 ```bash
-PROJECT_ROOT=/path/to/agentd
-PERSONAL_ROOT=/path/to/personal-skills
-
-mkdir -p "$PROJECT_ROOT/.agents/skills"
-ln -sfn "$PERSONAL_ROOT/skills/my-personal-skill" \
-  "$PROJECT_ROOT/.agents/skills/my-personal-skill"
-printf '%s\n' '.agents/skills/my-personal-skill' >> "$PROJECT_ROOT/.git/info/exclude"
+LOADOUT_CONFIG="$PWD/.loadout/agentd.toml" loadout install
 ```
 
-Use an idempotent local installer script if you have many personal skills.
+## Personal Overlay Pattern (Local Only)
+
+1. Store personal skills in a private location (for example a personal repo
+   clone).
+2. Add that location to your local loadout config `sources.skills` before the
+   shared source so first match wins.
+3. Enable personal skill names in `global.skills` or project skills for your
+   local config.
+
+Example local config snippet:
+
+```toml
+[sources]
+skills = [
+  "/path/to/personal-skills",
+  "/path/to/agentd/skills",
+]
+```
+
+Do not commit personal config edits. Keep them in your user-scoped
+`~/.config/loadout/loadout.toml` or in an untracked local copy.
 
 ## Collision Policy
 
-- Personal overlay names may intentionally collide with tracked public skill directory names.
-- On collision, the personal overlay skill overrides the project skill for that developer's local environment.
-- Use this for personal adaptation of shared workflows without changing team-wide defaults.
+- Name collisions are allowed by source ordering.
+- First matching source wins; this enables personal override of a shared skill.
+- Shared defaults remain unchanged for other developers.
 
 ## Git Hygiene Policy
 
-- Do not add personal overlay patterns to `.gitignore`.
-- Do not commit personal skill names, URLs, or local paths.
-- Use `.git/info/exclude` (or equivalent local-only ignore) for personal overlay entries.
+- Do not commit personal source paths or private skill names.
+- Keep personal local setup out of tracked files.
+- Generated target directories are ignored by this repo.
 
 ## Verification Checklist
 
-Run after installing or updating personal overlays:
+Run after personal overlay changes:
 
 ```bash
+LOADOUT_CONFIG="$PWD/.loadout/agentd.toml" loadout list
+LOADOUT_CONFIG="$PWD/.loadout/agentd.toml" loadout check
 git status --porcelain
 ```
 
-Expected: no personal overlay paths appear in output.
+Expected:
 
-Optional link verification:
+- `loadout list` resolves skills from expected source paths.
+- `loadout check` reports no blocking errors.
+- `git status --porcelain` contains no personal path leakage.
+
+## Rollback To Manual Alias Flow
+
+If pilot behavior fails, use manual links:
 
 ```bash
-find .agents/skills -maxdepth 1 -type l -print
+mkdir -p .agents .claude .opencode
+ln -sfn ../skills .agents/skills
+ln -sfn ../.agents/skills .claude/skills
+ln -sfn ../.agents/skills .opencode/skills
 ```
 
-Expected: only intentionally installed personal symlinks are listed.
+This restores manual project-level discovery paths for Codex, Claude Code, and
+OpenCode.
+
+When using normal pilot operation, do not hand-manage symlinks inside these
+target directories; let `loadout install` and `loadout clean` own them.
