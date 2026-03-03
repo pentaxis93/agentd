@@ -18,12 +18,21 @@ Coming soon.
 
 ## Developer Tooling: Skills
 
-agentd supports project-level skills with two layers:
+agentd pilots `loadout` for project-level skill discovery.
 
-- Shared public skills tracked in this repository at `.agents/skills/`.
-- Optional personal skills overlay installed locally at project level and kept untracked.
+- Project skills are tracked in this repository at `skills/` and used as the
+  sole default `loadout` source for project setup.
+- Skill vendoring is manifest-driven via `skills.manifest.toml`.
+  - Sync vendored skills from upstream: `make skills-sync`
+  - Verify manifest + config coherence: `make skills-verify`
+- `loadout` installs enabled skills into tool discovery directories:
+  - `.agents/skills/` (Codex)
+  - `.claude/skills/` (Claude Code)
+  - `.opencode/skills/` (OpenCode)
+- Project pilot config lives at `.loadout/agentd.toml` and is intended to be used with:
+  - `LOADOUT_CONFIG=$PWD/.loadout/agentd.toml loadout install`
 
-See `docs/personal-skill-overlay.md` for the personal overlay workflow, collision policy, and git-clean verification steps.
+See `docs/personal-skill-overlay.md` for personal overlay layering and rollback to manual links.
 
 ## License
 

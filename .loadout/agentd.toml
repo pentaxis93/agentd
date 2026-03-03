@@ -1,0 +1,23 @@
+[sources]
+skills = ["../skills"]
+
+[target_aliases.claude_code]
+global = "~/.claude/skills"
+project = ".claude/skills"
+
+[target_aliases.opencode]
+global = "~/.config/opencode/skills"
+project = ".opencode/skills"
+
+[target_aliases.codex]
+global = "~/.agents/skills"
+project = ".agents/skills"
+
+[global]
+targets = []
+skills = ["ground", "bdd", "land", "issue-craft", "planning"]
+
+[projects.".."]
+inherit = true
+skills = []
+targets = ["claude_code", "opencode", "codex"]

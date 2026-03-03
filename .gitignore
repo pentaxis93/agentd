@@ -1,1 +1,4 @@
 /target
+/.agents/skills
+/.claude/skills
+/.opencode/skills

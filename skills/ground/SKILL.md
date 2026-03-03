@@ -1,12 +1,12 @@
 ---
 name: ground
 description: >-
-  Ground a design from first principles before generating original work.
-  Use when creating specs, architectures, processes, solutions, methodologies,
-  problem framings — any task requiring original design. Also use for migration,
-  upgrade, and technology selection decisions. Triggers: 'ground this',
-  'start from first principles', 'what does this need to enable',
-  'check my assumptions', 'design from constraints'.
+  First-principles cognitive discipline for all generative work. Use when
+  creating specs, architectures, processes, solutions, methodologies, problem
+  framings — any task requiring original design. Also applies to migration,
+  upgrade, and technology selection decisions. Establishes what the work must
+  enable before decomposing to verified constraints, then builds from what
+  is actually true.
 metadata:
   version: "2.0.0"
   updated: "2026-03-01"
@@ -111,7 +111,7 @@ Defaulting to the abstraction level of adjacent or existing systems.
 Documenting what is instead of designing what's needed.
 
 **Recognition:** Your output reads as a description of the current system rather than a design derived from requirements. Every claim traces to existing code or configuration, none trace to user needs or capability requirements.
-**Corrective:** "Am I describing what exists or defining what's needed?" If every statement traces to implementation and none trace to need, you have not designed anything. Return to Orient.
+**Corrective:** "Am I describing what exists or defining what's needed?" If every statement traces to implementation and none trace to need, you have written a description, not a design. Return to Orient.
 
 ---
 
