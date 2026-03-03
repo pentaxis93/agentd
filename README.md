@@ -20,12 +20,11 @@ Coming soon.
 
 agentd pilots `loadout` for project-level skill discovery.
 
-- Shared public skills are tracked in this repository at `skills/`.
-- Additional project skills are sourced from sibling repositories via
-  `.loadout/agentd.toml`:
-  - `../../agentd-personal-skills` (`land`)
-  - `../../agents/skills/workflow/issue-craft` (`issue-craft`)
-  - `../../agents/skills/workflow/planning` (`planning`)
+- Project skills are tracked in this repository at `skills/` and used as the
+  sole default `loadout` source for project setup.
+- Skill vendoring is manifest-driven via `skills.manifest.toml`.
+  - Sync vendored skills from upstream: `make skills-sync`
+  - Verify manifest + config coherence: `make skills-verify`
 - `loadout` installs enabled skills into tool discovery directories:
   - `.agents/skills/` (Codex)
   - `.claude/skills/` (Claude Code)

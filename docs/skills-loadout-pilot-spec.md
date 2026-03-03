@@ -6,6 +6,7 @@ skill discovery for Codex, Claude Code, and OpenCode in `agentd`.
 ## Scenario 1: Fresh project install exposes identical project skills
 
 Given a clone of `agentd` with `skills/` populated  
+And no sibling skill repositories present  
 And `LOADOUT_CONFIG` set to `.loadout/agentd.toml`  
 When `loadout install` runs in the project root  
 Then `.agents/skills`, `.claude/skills`, and `.opencode/skills` each contain
@@ -16,7 +17,7 @@ And each entry is a symlink to the canonical source under `skills/`.
 
 Given an installed project from Scenario 1  
 When the enabled skill set in `.loadout/agentd.toml` changes  
-And `loadout install` runs again  
+And `loadout clean` then `loadout install` runs again  
 Then all project target directories reflect the same updated skill set  
 And no target has stale managed links.
 

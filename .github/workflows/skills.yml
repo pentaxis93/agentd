@@ -1,0 +1,29 @@
+name: Skills
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install loadout
+        run: cargo install --git https://github.com/pentaxis93/loadout.git --tag v0.4.0 loadout
+
+      - name: Verify skills manifest
+        run: ./scripts/skills_verify.sh
+
+      - name: Smoke test loadout pilot
+        run: ./tests/loadout_pilot_smoke.sh
+
+      - name: Smoke test gitignore rules
+        run: ./tests/gitignore_skill_targets_smoke.sh
+
+      - name: Run workspace tests
+        run: cargo test --workspace

@@ -11,13 +11,12 @@ How to layer personal skills on top of project skills using `loadout`.
 ## Project Pilot Contract
 
 - Canonical tracked source in this repo: `skills/<skill>/SKILL.md`
+- Skills are curated through `skills.manifest.toml` and synchronized with
+  `scripts/skills_sync.sh`.
 - Project loadout config: `.loadout/agentd.toml`
-- Project default sources are ordered for precedence:
-  1. `../../agentd-personal-skills`
-  2. `../../agents/skills/workflow/issue-craft`
-  3. `../../agents/skills/workflow/planning`
-  4. `../skills`
-- Project default enabled skills: `ground`, `land`, `issue-craft`, `planning`
+- Project default source is self-contained in this repo: `../skills`
+- Project default enabled skills: `ground`, `bdd`, `land`, `issue-craft`,
+  `planning`
 - Loadout-managed project targets:
   - `.agents/skills` (Codex)
   - `.claude/skills` (Claude Code)
@@ -34,7 +33,7 @@ LOADOUT_CONFIG="$PWD/.loadout/agentd.toml" loadout install
 1. Store personal skills in a private location (for example a personal repo
    clone).
 2. Add that location to your local loadout config `sources.skills` before the
-   shared source so first match wins.
+   project source so first match wins.
 3. Enable personal skill names in `global.skills` or project skills for your
    local config.
 
@@ -68,6 +67,7 @@ Do not commit personal config edits. Keep them in your user-scoped
 Run after personal overlay changes:
 
 ```bash
+./scripts/skills_verify.sh
 LOADOUT_CONFIG="$PWD/.loadout/agentd.toml" loadout list
 LOADOUT_CONFIG="$PWD/.loadout/agentd.toml" loadout check
 git status --porcelain
@@ -75,6 +75,7 @@ git status --porcelain
 
 Expected:
 
+- `skills_verify.sh` confirms manifest/loadout/skills directory coherence.
 - `loadout list` resolves skills from expected source paths.
 - `loadout check` reports no blocking errors.
 - `git status --porcelain` contains no personal path leakage.

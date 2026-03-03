@@ -1,0 +1,27 @@
+[metadata]
+format_version = 1
+source_repo = "https://github.com/pentaxis93/agents"
+source_ref = "workspace-local"
+
+[defaults]
+skills = ["ground", "bdd", "land", "issue-craft", "planning"]
+
+[[skill]]
+name = "ground"
+source_path = "cognition/ground"
+
+[[skill]]
+name = "bdd"
+source_path = "development/bdd"
+
+[[skill]]
+name = "land"
+source_path = "workflow/land"
+
+[[skill]]
+name = "issue-craft"
+source_path = "workflow/issue-craft"
+
+[[skill]]
+name = "planning"
+source_path = "workflow/planning"

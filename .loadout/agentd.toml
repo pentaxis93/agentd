@@ -1,10 +1,5 @@
 [sources]
-skills = [
-  "../../agentd-personal-skills",
-  "../../agents/skills/workflow/issue-craft",
-  "../../agents/skills/workflow/planning",
-  "../skills",
-]
+skills = ["../skills"]
 
 [target_aliases.claude_code]
 global = "~/.claude/skills"
@@ -20,7 +15,7 @@ project = ".agents/skills"
 
 [global]
 targets = []
-skills = ["ground", "land", "issue-craft", "planning"]
+skills = ["ground", "bdd", "land", "issue-craft", "planning"]
 
 [projects.".."]
 inherit = true
