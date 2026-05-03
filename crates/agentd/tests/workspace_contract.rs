@@ -194,6 +194,10 @@ fn release_adoption_verification_checks_hostile_user_config_cannot_override_work
         "release verification should model hostile hook inheritance"
     );
     assert!(
+        script.contains("XDG_CONFIG_HOME=\"$hostile_home/.config\""),
+        "release verification should scope XDG_CONFIG_HOME to the hostile config root"
+    );
+    assert!(
         script.contains("cargo release config"),
         "release verification should inspect resolved cargo-release config"
     );

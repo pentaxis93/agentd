@@ -65,6 +65,7 @@ EOF
 (
     cd "$source_repo"
     HOME="$hostile_home" \
+        XDG_CONFIG_HOME="$hostile_home/.config" \
         CARGO_HOME="$cargo_home" \
         RUSTUP_HOME="$rustup_home" \
         cargo release config >"$resolved_config_log"
