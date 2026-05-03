@@ -14,6 +14,12 @@ fn read_workspace_file(path: &str) -> String {
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
+fn read_workspace_toml(path: &str) -> toml::Value {
+    read_workspace_file(path)
+        .parse::<toml::Value>()
+        .unwrap_or_else(|error| panic!("{path} should be valid TOML: {error}"))
+}
+
 #[test]
 fn workspace_metadata_lists_only_grounded_crates() {
     let output = Command::new("cargo")
@@ -40,6 +46,45 @@ fn workspace_metadata_lists_only_grounded_crates() {
     assert!(
         !stdout.contains("\"name\":\"forgejo-mcp\""),
         "workspace metadata still includes forgejo-mcp"
+    );
+}
+
+#[test]
+fn cargo_release_configuration_lives_at_the_workspace_root() {
+    assert!(
+        workspace_root().join("release.toml").is_file(),
+        "release.toml should exist at the workspace root"
+    );
+}
+
+#[test]
+fn workspace_packages_inherit_the_workspace_version() {
+    for manifest in [
+        "crates/agentd/Cargo.toml",
+        "crates/agentd-runner/Cargo.toml",
+        "crates/agentd-scheduler/Cargo.toml",
+    ] {
+        let manifest_toml = read_workspace_toml(manifest);
+        let version = manifest_toml
+            .get("package")
+            .and_then(|package| package.get("version"))
+            .unwrap_or_else(|| panic!("{manifest} should declare package.version"));
+
+        assert_eq!(
+            version.get("workspace").and_then(toml::Value::as_bool),
+            Some(true),
+            "{manifest} should inherit version.workspace"
+        );
+    }
+}
+
+#[test]
+fn changelog_keeps_an_unreleased_section_for_release_rolls() {
+    let changelog = read_workspace_file("CHANGELOG.md");
+
+    assert!(
+        changelog.contains("\n## [Unreleased]\n"),
+        "CHANGELOG.md should keep a rollable [Unreleased] heading"
     );
 }
 

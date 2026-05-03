@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+
+- Release operations now use per-repo `cargo-release` configuration that
+  follows the commons ADR-0006 workspace-version discipline.
+
 ### Changed
 
 - The supported daemon deployment shape is now a locally built container image
