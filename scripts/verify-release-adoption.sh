@@ -30,7 +30,7 @@ git -C "$source_repo" init -q
 git -C "$source_repo" config user.name "agentd release verification"
 git -C "$source_repo" config user.email "agentd-release-verification@example.invalid"
 git -C "$source_repo" checkout -q -b main
-git -C "$source_repo" add .
+git -C "$source_repo" -c core.excludesFile=/dev/null add .
 git -C "$source_repo" commit -q -m "test: seed release verification"
 
 git init --bare -q "$remote_repo"
