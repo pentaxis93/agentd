@@ -83,7 +83,7 @@ assert_resolved_config() {
 assert_resolved_config 'release = true'
 assert_resolved_config 'tag = true'
 assert_resolved_config 'verify = true'
-assert_resolved_config 'pre-release-hook = ["/usr/bin/true"]'
+assert_resolved_config 'pre-release-hook = ["true"]'
 assert_resolved_config 'push-options = []'
 assert_resolved_config 'owners = []'
 assert_resolved_config 'enable-features = []'

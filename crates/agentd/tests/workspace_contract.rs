@@ -96,7 +96,7 @@ fn cargo_release_configuration_pins_compliance_critical_values() {
         config
             .get("pre-release-hook")
             .and_then(toml::Value::as_array),
-        Some(&string_array(&["/usr/bin/true"]))
+        Some(&string_array(&["true"]))
     );
     assert_eq!(
         config
@@ -206,7 +206,7 @@ fn release_adoption_verification_checks_hostile_user_config_cannot_override_work
         "release verification should assert workspace-pinned release and tag behavior"
     );
     assert!(
-        script.contains("pre-release-hook = [\"/usr/bin/true\"]"),
+        script.contains("pre-release-hook = [\"true\"]"),
         "release verification should assert the workspace-pinned no-op hook"
     );
 }
