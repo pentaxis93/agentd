@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Release operations now use per-repo `cargo-release` configuration that
-  follows the commons ADR-0006 workspace-version discipline.
+  follows the commons ADR-0006 workspace-version discipline and pins
+  compliance-critical `cargo-release` behavior against user-level config
+  fallthrough.
 
 ### Changed
 

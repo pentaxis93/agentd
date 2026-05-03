@@ -20,6 +20,13 @@ fn read_workspace_toml(path: &str) -> toml::Value {
         .unwrap_or_else(|error| panic!("{path} should be valid TOML: {error}"))
 }
 
+fn string_array(values: &[&str]) -> Vec<toml::Value> {
+    values
+        .iter()
+        .map(|value| toml::Value::String((*value).to_string()))
+        .collect()
+}
+
 #[test]
 fn workspace_metadata_lists_only_grounded_crates() {
     let output = Command::new("cargo")
@@ -58,6 +65,77 @@ fn cargo_release_configuration_lives_at_the_workspace_root() {
 }
 
 #[test]
+fn cargo_release_configuration_pins_compliance_critical_values() {
+    let config = read_workspace_toml("release.toml");
+
+    assert_eq!(
+        config.get("release").and_then(toml::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(config.get("tag").and_then(toml::Value::as_bool), Some(true));
+    assert_eq!(
+        config.get("verify").and_then(toml::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        config.get("sign-commit").and_then(toml::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        config.get("sign-tag").and_then(toml::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        config
+            .get("pre-release-replacements")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice),
+        Some(&[][..])
+    );
+    assert_eq!(
+        config
+            .get("pre-release-hook")
+            .and_then(toml::Value::as_array),
+        Some(&string_array(&["true"]))
+    );
+    assert_eq!(
+        config
+            .get("push-options")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice),
+        Some(&[][..])
+    );
+    assert_eq!(
+        config
+            .get("owners")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice),
+        Some(&[][..])
+    );
+    assert_eq!(
+        config
+            .get("enable-features")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice),
+        Some(&[][..])
+    );
+    assert_eq!(
+        config
+            .get("enable-all-features")
+            .and_then(toml::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        config.get("metadata").and_then(toml::Value::as_str),
+        Some("optional")
+    );
+    assert_eq!(
+        config.get("certs-source").and_then(toml::Value::as_str),
+        Some("webpki")
+    );
+}
+
+#[test]
 fn workspace_packages_inherit_the_workspace_version() {
     for manifest in [
         "crates/agentd/Cargo.toml",
@@ -85,6 +163,51 @@ fn changelog_keeps_an_unreleased_section_for_release_rolls() {
     assert!(
         changelog.contains("\n## [Unreleased]\n"),
         "CHANGELOG.md should keep a rollable [Unreleased] heading"
+    );
+}
+
+#[test]
+fn changelog_records_release_configuration_user_config_hardening() {
+    let changelog = read_workspace_file("CHANGELOG.md");
+
+    assert!(
+        changelog.contains("compliance-critical `cargo-release` behavior")
+            && changelog.contains("user-level config"),
+        "CHANGELOG.md should record the cargo-release user-config hardening"
+    );
+}
+
+#[test]
+fn release_adoption_verification_checks_hostile_user_config_cannot_override_workspace_pins() {
+    let script = read_workspace_file("scripts/verify-release-adoption.sh");
+
+    assert!(
+        script.contains("hostile_home=\"$scratch/hostile-home\""),
+        "release verification should create an isolated hostile cargo-release home"
+    );
+    assert!(
+        script.contains("release = false") && script.contains("tag = false"),
+        "release verification should model hostile release and tag overrides"
+    );
+    assert!(
+        script.contains("pre-release-hook = [\"/bin/false\"]"),
+        "release verification should model hostile hook inheritance"
+    );
+    assert!(
+        script.contains("XDG_CONFIG_HOME=\"$hostile_home/.config\""),
+        "release verification should scope XDG_CONFIG_HOME to the hostile config root"
+    );
+    assert!(
+        script.contains("cargo release config"),
+        "release verification should inspect resolved cargo-release config"
+    );
+    assert!(
+        script.contains("release = true") && script.contains("tag = true"),
+        "release verification should assert workspace-pinned release and tag behavior"
+    );
+    assert!(
+        script.contains("pre-release-hook = [\"true\"]"),
+        "release verification should assert the workspace-pinned no-op hook"
     );
 }
 
