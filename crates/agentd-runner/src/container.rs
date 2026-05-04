@@ -208,7 +208,7 @@ fn build_container_script(
     script.push_str(&shell_quote(&internal_audit_runa_dir));
     script.push(' ');
     script.push_str(&shell_quote(&repo_runa_dir));
-    script.push_str("\nchown -R ");
+    script.push_str("\nchown ");
     script.push_str(&shell_quote(&user_group));
     script.push(' ');
     script.push_str(&shell_quote(&internal_audit_runa_dir));
