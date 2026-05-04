@@ -5,6 +5,7 @@ use crate::naming::{
     PODMAN_RESOURCE_PREFIX, is_daemon_instance_id, parse_container_name, parse_secret_name,
 };
 use crate::podman::run_podman_command;
+use crate::resources::cleanup_podman_secret_names;
 use crate::{RunnerError, StartupReconciliationReport};
 use serde::Deserialize;
 
@@ -147,15 +148,5 @@ fn remove_containers(container_names: &[String]) -> Result<(), RunnerError> {
 }
 
 fn remove_secrets(secret_names: &[String]) -> Result<(), RunnerError> {
-    if secret_names.is_empty() {
-        return Ok(());
-    }
-
-    let mut args = vec![
-        "secret".to_string(),
-        "rm".to_string(),
-        "--ignore".to_string(),
-    ];
-    args.extend(secret_names.iter().cloned());
-    run_podman_command(args).map(|_| ())
+    cleanup_podman_secret_names(secret_names)
 }
