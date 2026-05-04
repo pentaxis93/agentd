@@ -208,10 +208,6 @@ fn build_container_script(
     script.push_str(&shell_quote(&internal_audit_runa_dir));
     script.push(' ');
     script.push_str(&shell_quote(&repo_runa_dir));
-    script.push_str("\nchown ");
-    script.push_str(&shell_quote(&user_group));
-    script.push(' ');
-    script.push_str(&shell_quote(&internal_audit_runa_dir));
     script.push_str("\nexport HOME=");
     script.push_str(&shell_quote(&home_dir));
     if let Some(work_unit) = &invocation.work_unit {
@@ -228,16 +224,16 @@ fn build_container_script(
         let workspace_dir = format!("{repo_runa_dir}/workspace/{}", resolved_input.artifact_type);
         let artifact_path = format!("{workspace_dir}/{}.json", resolved_input.artifact_id);
         let staged_document_path = format!("{INVOCATION_INPUT_MOUNT_PATH}/document.json");
-        script.push_str("\nmkdir -p ");
+        script.push_str("\ngosu ");
+        script.push_str(&shell_quote(&user_group));
+        script.push_str(" mkdir -p ");
         script.push_str(&shell_quote(&workspace_dir));
-        script.push_str("\ncp ");
+        script.push_str("\ngosu ");
+        script.push_str(&shell_quote(&user_group));
+        script.push_str(" cp ");
         script.push_str(&shell_quote(&staged_document_path));
         script.push(' ');
         script.push_str(&shell_quote(&artifact_path));
-        script.push_str("\nchown -R ");
-        script.push_str(&shell_quote(&user_group));
-        script.push(' ');
-        script.push_str(&shell_quote(&workspace_dir));
     }
     script.push_str("\nexec gosu ");
     script.push_str(&shell_quote(&user_group));
