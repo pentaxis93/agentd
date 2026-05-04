@@ -323,6 +323,35 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
 }
 
 #[test]
+fn build_container_script_prepares_audit_mount_root_without_recursive_traversal() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            agent_name: "myagent".to_string(),
+            ..test_session_spec()
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+        None,
+    );
+
+    assert!(
+        script.contains(
+            "\nln -s '/home/myagent/.agentd/audit/runa' '/home/myagent/repo/.runa'\n\
+             chown 'myagent:myagent' '/home/myagent/.agentd/audit/runa'\n\
+             export HOME='/home/myagent'\n\
+             unset AGENTD_WORK_UNIT\n\
+             gosu 'myagent:myagent' runa init"
+        ),
+        "audit mount root should receive non-recursive ownership setup before runa init: {script}"
+    );
+}
+
+#[test]
 fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_targets() {
     let script = build_container_script(
         &crate::SessionSpec {
