@@ -323,7 +323,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
 }
 
 #[test]
-fn build_container_script_prepares_audit_mount_root_without_recursive_traversal() {
+fn build_container_script_uses_mode_based_audit_mount_writability_without_chown() {
     let script = build_container_script(
         &crate::SessionSpec {
             agent_name: "myagent".to_string(),
@@ -342,12 +342,49 @@ fn build_container_script_prepares_audit_mount_root_without_recursive_traversal(
     assert!(
         script.contains(
             "\nln -s '/home/myagent/.agentd/audit/runa' '/home/myagent/repo/.runa'\n\
-             chown 'myagent:myagent' '/home/myagent/.agentd/audit/runa'\n\
              export HOME='/home/myagent'\n\
              unset AGENTD_WORK_UNIT\n\
              gosu 'myagent:myagent' runa init"
         ),
-        "audit mount root should receive non-recursive ownership setup before runa init: {script}"
+        "audit mount root should rely on host-side mode setup before runa init: {script}"
+    );
+    assert!(
+        !script.contains("chown 'myagent:myagent' '/home/myagent/.agentd/audit/runa'"),
+        "rootless session setup must not chown the host-backed audit mount: {script}"
+    );
+}
+
+#[test]
+fn build_container_script_materializes_invocation_input_without_audit_workspace_chown() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            agent_name: "myagent".to_string(),
+            ..test_session_spec()
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+        Some(&ResolvedInvocationInput {
+            artifact_type: "request".to_string(),
+            artifact_id: "operator-input".to_string(),
+            document_json: "{}\n".to_string(),
+        }),
+    );
+
+    assert!(
+        script.contains(
+            "\ngosu 'myagent:myagent' mkdir -p '/home/myagent/repo/.runa/workspace/request'\n\
+             gosu 'myagent:myagent' cp '/agentd/invocation-input/document.json' '/home/myagent/repo/.runa/workspace/request/operator-input.json'\n"
+        ),
+        "invocation input should be written through the session user into the audit-backed workspace: {script}"
+    );
+    assert!(
+        !script.contains("chown -R 'myagent:myagent' '/home/myagent/repo/.runa/workspace/request'"),
+        "rootless session setup must not chown audit-backed workspace input: {script}"
     );
 }
 

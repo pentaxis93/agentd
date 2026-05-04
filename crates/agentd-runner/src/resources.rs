@@ -16,11 +16,14 @@ use crate::validation::REPO_TOKEN_ENV;
 use getrandom::fill as fill_random_bytes;
 use std::collections::HashSet;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
 const INVOCATION_INPUT_STAGE_DIR_NAME: &str = "invocation-input";
 const INVOCATION_INPUT_FILE_NAME: &str = "document.json";
+const INVOCATION_INPUT_STAGE_DIR_MODE: u32 = 0o755;
+const INVOCATION_INPUT_FILE_MODE: u32 = 0o644;
 const AUDIT_RUNA_STAGE_LINK_NAME: &str = "audit-runa";
 const ADDITIONAL_MOUNT_STAGE_PREFIX: &str = "mount-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
@@ -361,9 +364,15 @@ fn create_invocation_input_mount(
 
     let staged_dir = staging_dir.join(INVOCATION_INPUT_STAGE_DIR_NAME);
     fs::create_dir_all(&staged_dir)?;
-    fs::write(
-        staged_dir.join(INVOCATION_INPUT_FILE_NAME),
-        &resolved_input.document_json,
+    fs::set_permissions(
+        &staged_dir,
+        fs::Permissions::from_mode(INVOCATION_INPUT_STAGE_DIR_MODE),
+    )?;
+    let staged_document_path = staged_dir.join(INVOCATION_INPUT_FILE_NAME);
+    fs::write(&staged_document_path, &resolved_input.document_json)?;
+    fs::set_permissions(
+        &staged_document_path,
+        fs::Permissions::from_mode(INVOCATION_INPUT_FILE_MODE),
     )?;
 
     Ok(Some(PreparedBindMount {
@@ -458,9 +467,11 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        INVOCATION_INPUT_FILE_NAME, INVOCATION_INPUT_STAGE_DIR_NAME, create_invocation_input_mount,
         prepare_session_resources, rollback_failed_staging_dir_allocation, unique_suffix_with,
     };
     use crate::audit::SessionAuditRecord;
+    use crate::input::{INVOCATION_INPUT_MOUNT_PATH, ResolvedInvocationInput};
     use crate::test_support::{
         CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario,
         capture_tracing_events, fake_podman_lock, test_session_spec,
@@ -855,5 +866,57 @@ mod tests {
             }
             other => panic!("expected MissingMountSource, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn create_invocation_input_mount_repairs_runner_created_stage_modes() {
+        let staging_dir = unique_test_dir("agentd-invocation-input-stage");
+        let invocation_input_dir = staging_dir.join(INVOCATION_INPUT_STAGE_DIR_NAME);
+        let document_path = invocation_input_dir.join(INVOCATION_INPUT_FILE_NAME);
+        fs::create_dir_all(&invocation_input_dir).expect("staged input dir should be created");
+        fs::set_permissions(&invocation_input_dir, fs::Permissions::from_mode(0o700))
+            .expect("staged input dir should become restrictive");
+        fs::write(&document_path, "stale\n").expect("staged input file should be written");
+        fs::set_permissions(&document_path, fs::Permissions::from_mode(0o600))
+            .expect("staged input file should become restrictive");
+
+        let mount = create_invocation_input_mount(
+            Some(&ResolvedInvocationInput {
+                artifact_type: "request".to_string(),
+                artifact_id: "operator-input".to_string(),
+                document_json: "{\"description\":\"Add a status page\",\"source\":\"operator\"}\n"
+                    .to_string(),
+            }),
+            &staging_dir,
+        )
+        .expect("invocation input mount should be created")
+        .expect("resolved input should create a mount");
+
+        assert_eq!(
+            fs::metadata(&invocation_input_dir)
+                .expect("staged input dir metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&document_path)
+                .expect("staged input document metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert_eq!(
+            fs::read_to_string(&document_path).expect("staged input document should be readable"),
+            "{\"description\":\"Add a status page\",\"source\":\"operator\"}\n"
+        );
+        assert_eq!(mount.source, invocation_input_dir);
+        assert_eq!(mount.target, PathBuf::from(INVOCATION_INPUT_MOUNT_PATH));
+        assert!(mount.read_only);
+        assert!(mount.relabel_shared);
+
+        fs::remove_dir_all(&staging_dir).expect("temporary staging dir should be removed");
     }
 }

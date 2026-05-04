@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traversing the bind-mounted `runa/` directory, allowing containerized daemon
   deployments to reach `runa init` when the audit mount is not readable during
   recursive ownership transfer.
+- Session setup no longer chowns the host-backed audit mount or staged input
+  workspace from inside the rootless session container, and runner-created
+  invocation-input staging now uses explicit host-side read modes, preserving
+  the mode-based audit writability contract for credential-bearing runs.
 - Session secret cleanup now works on the supported Debian Bookworm Podman
   version floor by avoiding `podman secret rm --ignore` while preserving
   idempotent cleanup for already-removed secrets.
