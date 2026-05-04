@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Session secret cleanup now works on the supported Debian Bookworm Podman
+  version floor by avoiding `podman secret rm --ignore` while preserving
+  idempotent cleanup for already-removed secrets.
 - Default socket resolution now fails explicitly when `XDG_RUNTIME_DIR` is
   unset, empty, or relative instead of silently selecting a fallback path that
   may belong to a different daemon.

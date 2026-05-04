@@ -14,6 +14,7 @@ use crate::session_paths::session_internal_audit_runa_dir;
 use crate::types::{RunnerError, SessionInvocation, SessionSpec};
 use crate::validation::REPO_TOKEN_ENV;
 use getrandom::fill as fill_random_bytes;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -247,21 +248,45 @@ fn rollback_failed_staging_dir_allocation(
 }
 
 pub(crate) fn cleanup_podman_secrets(secret_bindings: &[SecretBinding]) -> Result<(), RunnerError> {
-    if secret_bindings.is_empty() {
+    let secret_names = secret_bindings
+        .iter()
+        .map(|binding| binding.secret_name.clone())
+        .collect::<Vec<_>>();
+    cleanup_podman_secret_names(&secret_names)
+}
+
+pub(crate) fn cleanup_podman_secret_names(secret_names: &[String]) -> Result<(), RunnerError> {
+    if secret_names.is_empty() {
         return Ok(());
     }
 
-    let mut args = vec![
-        "secret".to_string(),
-        "rm".to_string(),
-        "--ignore".to_string(),
-    ];
+    let existing_secret_names = list_podman_secret_names()?;
+    let mut args = vec!["secret".to_string(), "rm".to_string()];
     args.extend(
-        secret_bindings
+        secret_names
             .iter()
-            .map(|binding| binding.secret_name.clone()),
+            .filter(|name| existing_secret_names.contains(name.as_str()))
+            .cloned(),
     );
+    if args.len() == 2 {
+        return Ok(());
+    }
+
     crate::podman::run_podman_command(args).map(|_| ())
+}
+
+fn list_podman_secret_names() -> Result<HashSet<String>, RunnerError> {
+    Ok(crate::podman::run_podman_command(vec![
+        "secret".to_string(),
+        "ls".to_string(),
+        "--format".to_string(),
+        "{{.Name}}".to_string(),
+    ])?
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .map(ToString::to_string)
+    .collect())
 }
 
 pub(crate) fn cleanup_methodology_staging_dir(path: &Path) -> Result<(), RunnerError> {
@@ -627,7 +652,8 @@ mod tests {
                 .with_secret_create(CommandBehavior::sequence(vec![
                     CommandOutcome::new()
                         .append_args_with_prefix("secret-commands.log", "create")
-                        .capture_stdin_to("secret-value.log"),
+                        .capture_stdin_to("secret-value.log")
+                        .track_secret_create(),
                     CommandOutcome::new()
                         .append_args_with_prefix("secret-commands.log", "create")
                         .stderr("secret create failed")
@@ -711,7 +737,8 @@ mod tests {
                 .with_secret_create(CommandBehavior::sequence(vec![
                     CommandOutcome::new()
                         .append_args_with_prefix("secret-commands.log", "create")
-                        .capture_stdin_to("secret-value.log"),
+                        .capture_stdin_to("secret-value.log")
+                        .track_secret_create(),
                     CommandOutcome::new()
                         .append_args_with_prefix("secret-commands.log", "create")
                         .stderr("repo token secret create failed")

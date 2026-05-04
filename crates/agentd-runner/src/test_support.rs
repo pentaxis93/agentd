@@ -137,11 +137,16 @@ impl FakePodmanScenario {
             secret_create: CommandBehavior::from_outcome(
                 CommandOutcome::new()
                     .append_args_with_prefix("secret-commands.log", "create")
-                    .capture_stdin_to("secret-value.log"),
+                    .capture_stdin_to("secret-value.log")
+                    .track_secret_create(),
             ),
-            secret_list: CommandBehavior::from_outcome(CommandOutcome::new()),
+            secret_list: CommandBehavior::from_outcome(
+                CommandOutcome::new().list_tracked_secrets(),
+            ),
             secret_remove: CommandBehavior::from_outcome(
-                CommandOutcome::new().append_args_with_prefix("secret-commands.log", "rm"),
+                CommandOutcome::new()
+                    .append_args_with_prefix("secret-commands.log", "rm")
+                    .track_secret_remove(),
             ),
             inspect: InspectBehavior::new(),
         }
@@ -277,6 +282,10 @@ pub(crate) struct CommandOutcome {
     append_args: Option<(String, String)>,
     stdin_file: Option<String>,
     reject_empty_stdin: Option<(String, i32)>,
+    reject_args_containing: Vec<(String, String, i32)>,
+    track_secret_create: bool,
+    track_secret_remove: bool,
+    list_tracked_secrets: bool,
     container_state: Option<String>,
     exec_sleep_ms: Option<u64>,
     record_pid_file: Option<String>,
@@ -309,6 +318,32 @@ impl CommandOutcome {
 
     pub(crate) fn reject_empty_stdin(mut self, message: &str, exit_code: i32) -> Self {
         self.reject_empty_stdin = Some((message.to_string(), exit_code));
+        self
+    }
+
+    pub(crate) fn reject_args_containing(
+        mut self,
+        needle: &str,
+        message: &str,
+        exit_code: i32,
+    ) -> Self {
+        self.reject_args_containing
+            .push((needle.to_string(), message.to_string(), exit_code));
+        self
+    }
+
+    pub(crate) fn track_secret_create(mut self) -> Self {
+        self.track_secret_create = true;
+        self
+    }
+
+    pub(crate) fn track_secret_remove(mut self) -> Self {
+        self.track_secret_remove = true;
+        self
+    }
+
+    pub(crate) fn list_tracked_secrets(mut self) -> Self {
+        self.list_tracked_secrets = true;
         self
     }
 
@@ -602,6 +637,25 @@ fn render_command_outcome(outcome: &CommandOutcome) -> String {
                 exit_code
             ));
         }
+    }
+    for (needle, message, exit_code) in &outcome.reject_args_containing {
+        body.push_str(&format!(
+            "for arg in \"$@\"; do\n    if [ \"$arg\" = {} ]; then\n        echo {} >&2\n        exit {}\n    fi\ndone\n",
+            sh_quote(needle),
+            sh_quote(message),
+            exit_code
+        ));
+    }
+    if outcome.track_secret_create {
+        body.push_str("printf '%s\\n' \"$1\" >> \"$log_root/secrets.log\"\n");
+    }
+    if outcome.track_secret_remove {
+        body.push_str(
+            "for secret_name in \"$@\"; do\n    if [ -f \"$log_root/secrets.log\" ]; then\n        grep -Fvx -- \"$secret_name\" \"$log_root/secrets.log\" > \"$log_root/secrets.next\" || true\n        mv \"$log_root/secrets.next\" \"$log_root/secrets.log\"\n    fi\ndone\n",
+        );
+    }
+    if outcome.list_tracked_secrets {
+        body.push_str("cat \"$log_root/secrets.log\" 2>/dev/null || true\n");
     }
     if let Some(state) = &outcome.container_state {
         body.push_str(&format!(

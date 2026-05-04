@@ -941,6 +941,7 @@ fn run_session_injects_empty_environment_values_via_direct_env_args() {
             CommandOutcome::new()
                 .append_args_with_prefix("secret-commands.log", "create")
                 .capture_stdin_to("secret-value.log")
+                .track_secret_create()
                 .reject_empty_stdin("secret data must be larger than 0", 96),
         )),
     );
@@ -1085,6 +1086,50 @@ fn run_session_releases_session_secrets_after_container_reaches_running_state() 
 }
 
 #[test]
+fn run_session_cleans_up_session_secrets_on_bookworm_podman_floor() {
+    let _guard = fake_podman_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixture = FakePodmanFixture::new();
+    fixture.install(
+        &FakePodmanScenario::new().with_secret_rm(CommandBehavior::from_outcome(
+            CommandOutcome::new()
+                .append_args_with_prefix("secret-commands.log", "rm")
+                .reject_args_containing(
+                    "--ignore",
+                    "Error: unknown flag: --ignore\nSee 'podman secret rm --help'",
+                    125,
+                )
+                .track_secret_remove(),
+        )),
+    );
+
+    let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+    let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
+        methodology_dir,
+        environment: vec![ResolvedEnvironmentVariable {
+            name: "GITHUB_TOKEN".to_string(),
+            value: "test-token".to_string(),
+        }],
+        ..test_session_spec()
+    });
+
+    assert_eq!(
+        outcome.expect("session should clean up secrets on the supported podman floor"),
+        SessionOutcome::Success { exit_code: 0 }
+    );
+    assert!(!fixture.secret_commands().contains("--ignore"));
+    assert_eq!(
+        fixture
+            .secret_commands()
+            .lines()
+            .filter(|line| line.starts_with("rm "))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn run_session_continues_when_secret_release_fails_after_container_reaches_running_state() {
     let _guard = fake_podman_lock()
         .lock()
@@ -1146,6 +1191,9 @@ fn wait_for_container_exit_returns_timeout_when_secret_release_fails() {
     let fixture = FakePodmanFixture::new();
     fixture.install(
         &FakePodmanScenario::new()
+            .with_secret_ls(CommandBehavior::from_outcome(
+                CommandOutcome::new().stdout("secret"),
+            ))
             .with_secret_rm(CommandBehavior::from_outcome(
                 CommandOutcome::new()
                     .append_args_with_prefix("secret-commands.log", "rm")

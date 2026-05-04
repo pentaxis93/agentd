@@ -466,7 +466,8 @@ mod tests {
                 .with_secret_create(CommandBehavior::sequence(vec![
                     CommandOutcome::new()
                         .append_args_with_prefix("secret-commands.log", "create")
-                        .capture_stdin_to("secret-value.log"),
+                        .capture_stdin_to("secret-value.log")
+                        .track_secret_create(),
                     CommandOutcome::new()
                         .append_args_with_prefix("secret-commands.log", "create")
                         .stderr("secret create failed")
@@ -1083,7 +1084,7 @@ mod tests {
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0 agentd-1a2b3c4d-bbbbbbbbbbbbbbbb-0 agentd-1a2b3c4d-cccccccccccccccc-repo-token agentd-1a2b3c4d-dddddddddddddddd-0 agentd-1a2b3c4d-1212121212121212-0\n"
+            "rm agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0 agentd-1a2b3c4d-bbbbbbbbbbbbbbbb-0 agentd-1a2b3c4d-cccccccccccccccc-repo-token agentd-1a2b3c4d-dddddddddddddddd-0 agentd-1a2b3c4d-1212121212121212-0\n"
         );
     }
 
@@ -1194,7 +1195,7 @@ mod tests {
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
+            "rm agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 
@@ -1250,7 +1251,7 @@ mod tests {
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
+            "rm agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 
@@ -1299,7 +1300,7 @@ mod tests {
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
+            "rm agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 
@@ -1472,7 +1473,7 @@ mod tests {
         );
         assert_eq!(
             fixture.secret_commands(),
-            "rm --ignore agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
+            "rm agentd-1a2b3c4d-aaaaaaaaaaaaaaaa-0\n"
         );
     }
 }
