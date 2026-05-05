@@ -127,7 +127,10 @@ pub(crate) fn finalize_session_transcript(record: &SessionAuditRecord) -> Result
     let events_path = record.transcript_dir.join("events.jsonl");
     let events = match fs::read_to_string(&events_path) {
         Ok(events) => events,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::write(&events_path, [])?;
+            String::new()
+        }
         Err(error) => return Err(error.into()),
     };
     let coverage = transcript_coverage(&events);
@@ -225,22 +228,14 @@ fn write_transcript_markdown(record: &SessionAuditRecord, events: &str) -> Resul
                     markdown.push_str(kind);
                     markdown.push_str("\n\n");
                     if let Some(content) = event.get("content").and_then(Value::as_str) {
-                        markdown.push_str("```text\n");
-                        markdown.push_str(content);
-                        if !content.ends_with('\n') {
-                            markdown.push('\n');
-                        }
-                        markdown.push_str("```\n\n");
+                        push_fenced_code_block(&mut markdown, "text", content);
                     } else {
-                        markdown.push_str("```json\n");
-                        markdown.push_str(line);
-                        markdown.push_str("\n```\n\n");
+                        push_fenced_code_block(&mut markdown, "json", line);
                     }
                 }
                 Err(_) => {
-                    markdown.push_str("## unparsed_event\n\n```text\n");
-                    markdown.push_str(line);
-                    markdown.push_str("\n```\n\n");
+                    markdown.push_str("## unparsed_event\n\n");
+                    push_fenced_code_block(&mut markdown, "text", line);
                 }
             }
         }
@@ -249,14 +244,43 @@ fn write_transcript_markdown(record: &SessionAuditRecord, events: &str) -> Resul
     Ok(())
 }
 
+fn push_fenced_code_block(markdown: &mut String, language: &str, content: &str) {
+    let fence = "`".repeat(max_consecutive_backticks(content).saturating_add(1).max(3));
+    markdown.push_str(&fence);
+    markdown.push_str(language);
+    markdown.push('\n');
+    markdown.push_str(content);
+    if !content.ends_with('\n') {
+        markdown.push('\n');
+    }
+    markdown.push_str(&fence);
+    markdown.push_str("\n\n");
+}
+
+fn max_consecutive_backticks(content: &str) -> usize {
+    let mut current = 0;
+    let mut max = 0;
+    for character in content.chars() {
+        if character == '`' {
+            current += 1;
+            max = max.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    max
+}
+
 fn transcript_coverage(events: &str) -> &'static str {
     if events.trim().is_empty() {
         return "outer_streams_only";
     }
-    if events
-        .lines()
-        .any(|line| line.contains("\"source\":\"runa-mcp\""))
-    {
+    if events.lines().filter(|line| !line.trim().is_empty()).any(
+        |line| match serde_json::from_str::<Value>(line) {
+            Ok(event) => event.get("source").and_then(Value::as_str) == Some("runa-mcp"),
+            Err(_) => false,
+        },
+    ) {
         "full"
     } else {
         "missing_mcp_events"
@@ -1060,6 +1084,111 @@ mod tests {
         make_tree_writable(&root);
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_creates_empty_events_jsonl_when_no_events_were_emitted() {
+        let root = unique_test_dir("agentd-audit-empty-transcript");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "empty-transcript",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+
+        super::finalize_session_transcript(&record).expect("transcript should finalize");
+
+        let events_path = record.transcript_dir.join("events.jsonl");
+        let events =
+            fs::read_to_string(&events_path).expect("empty structured transcript should exist");
+        assert!(
+            events.is_empty(),
+            "empty jsonl file should contain no events"
+        );
+        for line in events.lines() {
+            let _event: Value = serde_json::from_str(line).expect("jsonl line should be json");
+        }
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("transcript manifest should exist"),
+        )
+        .expect("manifest should be json");
+        assert_eq!(manifest["coverage"], "outer_streams_only");
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn write_transcript_markdown_uses_a_wrapper_fence_longer_than_content_fences() {
+        let root = unique_test_dir("agentd-audit-fenced-transcript");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "fenced-transcript",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let content = "example\n```python\nprint('hello')\n```\n```json\n{\"ok\":true}\n```\n```toml\nname = \"agentd\"\n```";
+        let event = serde_json::json!({
+            "schema_version": 1,
+            "source": "runa",
+            "kind": "agent_output",
+            "content": content,
+        });
+        fs::write(
+            record.transcript_dir.join("events.jsonl"),
+            format!("{event}\n"),
+        )
+        .expect("events jsonl should be writable");
+
+        super::finalize_session_transcript(&record).expect("transcript should finalize");
+
+        let markdown = fs::read_to_string(record.transcript_dir.join("transcript.md"))
+            .expect("human-readable transcript should exist");
+        let expected_block = format!("````text\n{content}\n````\n\n");
+        assert!(
+            markdown.contains(&expected_block),
+            "outer fence should remain open around fenced content:\n{markdown}"
+        );
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn transcript_coverage_uses_parsed_event_sources() {
+        assert_eq!(super::transcript_coverage(""), "outer_streams_only");
+        assert_eq!(
+            super::transcript_coverage(
+                r#"{"schema_version":1,"source":"runa","kind":"agent_input"}"#
+            ),
+            "missing_mcp_events"
+        );
+        assert_eq!(
+            super::transcript_coverage(
+                r#"{"schema_version":1,"source": "runa-mcp","kind":"tool_call"}"#
+            ),
+            "full"
+        );
+        assert_eq!(
+            super::transcript_coverage(
+                r#"{"schema_version":1,"source":"runa","kind":"agent_output","content":"{\"source\":\"runa-mcp\"}"}"#
+            ),
+            "missing_mcp_events"
+        );
     }
 
     #[test]
