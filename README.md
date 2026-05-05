@@ -142,10 +142,22 @@ are not backfilled after downtime. Persistent audit records default to
 
 The supported daemon deployment shape is a locally built container image run by
 Quadlet. Build the image on the target host or another trusted build host with
-access to the checked-out source or release tag:
+access to the checked-out source or release tag. Deployment builds must pin the
+daemon source to an immutable tag or full commit SHA; do not deploy from `main`
+or another mutable branch ref. The shared release-candidate convention is
+defined in
+[commons RELEASE.md](https://github.com/tesserine/commons/blob/main/RELEASE.md).
 
 ```bash
-podman build --tag localhost/agentd:0.1.1 .
+podman build \
+  --build-arg AGENTD_REF=v0.1.2-rc.1 \
+  --tag localhost/agentd:v0.1.2-rc.1 .
+```
+
+Confirm the deployed image metadata with:
+
+```bash
+podman inspect localhost/agentd:v0.1.2-rc.1 | jq '.[0].Config.Labels'
 ```
 
 The image's default command starts the daemon and reads
@@ -211,7 +223,7 @@ deployments.
 Confirm the image contents with:
 
 ```bash
-podman run --rm --entrypoint /usr/local/bin/agentd localhost/agentd:0.1.1 --version
+podman run --rm --entrypoint /usr/local/bin/agentd localhost/agentd:v0.1.2-rc.1 --version
 ```
 
 ## Running a Session
