@@ -571,7 +571,7 @@ pub enum ConfigError {
     /// Two credentials within the same agent share a name.
     DuplicateCredentialName { agent: String, name: String },
     /// A credential name fails [`validate_environment_name`] (contains `,`
-    /// or `=`, or is the reserved `AGENT_NAME`).
+    /// or `=`, or uses a runner-owned environment name).
     InvalidCredentialName { agent: String, name: String },
     /// A required string field is empty or whitespace-only.
     EmptyField {
