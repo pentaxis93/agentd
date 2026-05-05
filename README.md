@@ -123,16 +123,18 @@ entries are bind mounts: `source` must be an absolute existing host path,
 `target` must be an absolute container path, targets must be unique within the
 agent, and runner-managed targets are reserved: `/agentd/methodology`,
 `/home/{agent}`, `/home/{agent}/.agentd`, and `/home/{agent}/repo` plus
-their descendants. Other
-targets under `/home/{agent}` remain supported, including read-only auth
-mounts such as `/home/site-builder/.claude`. Additional mounts are not
-relabelled; on SELinux-enabled hosts, operators must ensure each host path
-already has a container-compatible label. The base image must provide
-`/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, `runa`, and whatever
-binaries the declared agent command uses. UID/GID `1000` must be available for
-the session user. When an agent declares `schedule`, it must also declare
-`repo`. Schedules are evaluated in daemon-local time and missed fires are not
-backfilled after downtime. Persistent audit records default to
+their descendants. Other targets under `/home/{agent}` remain supported,
+including read-only auth mounts such as `/home/site-builder/.claude`.
+Additional mounts are not relabelled; on SELinux-enabled hosts, operators must
+ensure each host path already has a container-compatible label. Runner-owned
+mounts such as
+methodology, invocation input, and the internal audit `runa/` subtree are
+relabelled by Podman from their canonical host source paths. The base image
+must provide `/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, `runa`,
+and whatever binaries the declared agent command uses. UID/GID `1000` must be
+available for the session user. When an agent declares `schedule`, it must also
+declare `repo`. Schedules are evaluated in daemon-local time and missed fires
+are not backfilled after downtime. Persistent audit records default to
 `$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set
 `daemon.audit_root` to override that for system installations.
 
@@ -179,7 +181,9 @@ environment, and mounted Podman socket must be reachable by the daemon process
 inside the daemon container. Session bind sources that the daemon opens and
 then forwards to host Podman must also be valid from the host Podman service's
 view: `methodology_dir`, each agent-declared `mounts.source`, `audit_root`, and
-the runner staging directory. This image sets `TMPDIR=/var/lib/agentd/tmp`, so
+the runner staging directory. Runner-owned relabelled sources are passed to
+Podman as canonical host paths so SELinux relabeling applies to the real tree,
+not to a staging alias. This image sets `TMPDIR=/var/lib/agentd/tmp`, so
 the host must also expose that staging directory at `/var/lib/agentd/tmp` when
 using the image default. Mount host `/var/lib/agentd/tmp` to container
 `/var/lib/agentd/tmp`, or set `TMPDIR` to another path the operator can expose

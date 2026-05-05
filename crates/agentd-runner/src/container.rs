@@ -346,44 +346,24 @@ fn build_create_container_args(
         resources.container_name.clone(),
         "--userns".to_string(),
         format!("keep-id:uid={SESSION_USER_ID},gid={SESSION_GROUP_ID}"),
-        "--mount".to_string(),
-        format!(
-            "type=bind,src={},target={},ro=true,relabel=shared",
-            resources.methodology_mount_source.display(),
-            METHODOLOGY_MOUNT_PATH
-        ),
     ];
 
-    args.push("--mount".to_string());
-    args.push(format!(
-        "type=bind,src={},target={},ro={},relabel=shared",
-        resources.audit_mount.source.display(),
-        resources.audit_mount.target.display(),
-        resources.audit_mount.read_only
-    ));
+    push_bind_mount_arg(
+        &mut args,
+        resources.methodology_mount_source.as_path(),
+        Path::new(METHODOLOGY_MOUNT_PATH),
+        true,
+        true,
+    );
+
+    push_prepared_bind_mount_arg(&mut args, &resources.audit_mount);
 
     if let Some(mount) = &resources.invocation_input_mount {
-        args.push("--mount".to_string());
-        args.push(format!(
-            "type=bind,src={},target={},ro={},relabel=shared",
-            mount.source.display(),
-            mount.target.display(),
-            mount.read_only
-        ));
+        push_prepared_bind_mount_arg(&mut args, mount);
     }
 
     for mount in &resources.additional_mounts {
-        args.push("--mount".to_string());
-        let mut mount_value = format!(
-            "type=bind,src={},target={},ro={}",
-            mount.source.display(),
-            mount.target.display(),
-            mount.read_only
-        );
-        if mount.relabel_shared {
-            mount_value.push_str(",relabel=shared");
-        }
-        args.push(mount_value);
+        push_prepared_bind_mount_arg(&mut args, mount);
     }
 
     let mut secret_bindings = resources.environment_secret_bindings.iter();
@@ -433,6 +413,50 @@ fn build_create_container_args(
     args.push(build_container_script(spec, invocation, resolved_input));
 
     args
+}
+
+fn push_prepared_bind_mount_arg(
+    args: &mut Vec<String>,
+    mount: &crate::resources::PreparedBindMount,
+) {
+    push_bind_mount_arg(
+        args,
+        &mount.source,
+        &mount.target,
+        mount.read_only,
+        mount.relabel_shared,
+    );
+}
+
+fn push_bind_mount_arg(
+    args: &mut Vec<String>,
+    source: &Path,
+    target: &Path,
+    read_only: bool,
+    relabel_shared: bool,
+) {
+    if relabel_shared && source.to_string_lossy().contains(',') {
+        args.push("--volume".to_string());
+        args.push(format!(
+            "{}:{}:{},z",
+            source.display(),
+            target.display(),
+            if read_only { "ro" } else { "rw" }
+        ));
+        return;
+    }
+
+    args.push("--mount".to_string());
+    let mut mount_value = format!(
+        "type=bind,src={},target={},ro={}",
+        source.display(),
+        target.display(),
+        read_only
+    );
+    if relabel_shared {
+        mount_value.push_str(",relabel=shared");
+    }
+    args.push(mount_value);
 }
 
 fn cleanup_and_finalize_attached_start_after_wait_error(
