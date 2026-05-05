@@ -186,7 +186,7 @@ The runner prepares the execution environment:
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only.
 5. Creates an unprivileged unix user whose username is the configured agent name, with home directory `/home/{username}` and UID/GID `1000`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `groupadd`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before `runa init` and the agent command start. Base images that lack `/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, or `runa`, or that cannot reserve UID/GID `1000` for the session user, are not supported.
-6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{agent}/{session_id}/`, writes start metadata to `agentd/session.json`, and bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa` before the runtime initializes runa state.
+6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{agent}/{session_id}/`, writes start metadata to `agentd/session.json`, bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa`, and bind-mounts `agentd/transcript/` at `/agentd/transcript` before the runtime initializes runa state.
 7. Recursively transfers ownership of pre-existing content under `/home/{username}` while pruning host-backed bind-mount targets, the runner-owned audit leaf `/home/{username}/.agentd/audit/runa`, and `/home/{username}/repo`, then transfers ownership of `/home/{username}/repo` after the clone, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready. The runner reserves `/home/{username}` itself, `/home/{username}/.agentd` plus its descendants, and `/home/{username}/repo` plus its descendants so host-backed bind mounts cannot collide with runner-managed paths.
 8. When manual invocation includes operator input, reads the active methodology's `manifest.toml` plus `schemas/<type>.schema.json` on the host, validates the input there, stages the final JSON under a runner-managed bind mount at `/agentd/invocation-input`, and rejects unsupported request canonical versions before any container is created. The runner-created invocation-input mount source is staged with explicit host-side read/traverse modes so session-user access does not depend on the daemon process's umask. In `v0.1.x`, request-text input supports canonical request version `1.0.0` only, keyed by `x-tesserine-canonical.version`.
 9. Creates `/home/{username}/repo/.runa` as a symlink to `/home/{username}/.agentd/audit/runa`; writability comes from the host-side active `runa/` mode established during audit-record allocation, not from container-side ownership transfer. This is a runner-owned repo contract: cloned repositories must not contain a `.runa` entry at repo root. If the clone already contains one, setup fails explicitly rather than overwriting repository content.
@@ -195,18 +195,19 @@ The runner prepares the execution environment:
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner drops privileges with `gosu` and launches `runa run [--work-unit <id>] --agent-command -- <argv>` as the unprivileged session user from `/home/{username}/repo`. The argv comes from the declarative agent command, and `runa run` owns protocol execution from there. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange.
+The runner drops privileges with `gosu` and launches `runa run [--work-unit <id>] --agent-command -- <argv>` as the unprivileged session user from `/home/{username}/repo`. The argv comes from the declarative agent command, and `runa run` owns protocol execution from there. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange. agentd sets `RUNA_TRANSCRIPT_DIR=/agentd/transcript` and `RUNA_TRANSCRIPT_REDACT_ENV` so runa can persist the execution events it observes.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
 When the session ends or times out, the runner first force-removes the
-container. Only after cleanup succeeds does it finalize `agentd/session.json`
-with end timestamp and outcome through an atomic same-directory temp-file
-rename. Before that publish step it seals persisted non-metadata audit entries
-read-only on the host, then publishes a read-only `session.json` as the final
-commit point. Ancestor directories remain writable because the atomic replace
-requires a writable parent directory. The ephemeral container workspace still
-disappears, but the host audit record remains at
+container. Only after cleanup succeeds does it render transcript artifacts and
+finalize `agentd/session.json` with end timestamp and outcome through an
+atomic same-directory temp-file rename. Before that publish step it seals
+persisted non-metadata audit entries read-only on the host, then publishes a
+read-only `session.json` as the final commit point. Ancestor directories remain
+writable because the atomic replace requires a writable parent directory. The
+ephemeral container workspace still disappears, but the host audit record
+remains at
 `{audit_root}/{agent}/{session_id}/`.
 
 If agentd is interrupted after writing start metadata but before finalization,
@@ -260,9 +261,9 @@ relabelled; on SELinux-enabled hosts, operators must pre-label those host paths
 with a container-compatible context.
 
 The invocation-input mount is runner-owned, not operator-owned. Its target
-`/agentd/invocation-input` is reserved alongside `/agentd/methodology`, so
-agent-declared mounts cannot collide with the pre-command input-materialization
-path.
+`/agentd/invocation-input` is reserved alongside `/agentd/methodology` and
+`/agentd/transcript`, so agent-declared mounts cannot collide with
+runner-managed input or transcript paths.
 
 The internal audit mount is different from operator-declared mounts. It is
 runner-owned, not operator-owned, and agentd applies shared SELinux relabeling
@@ -305,14 +306,22 @@ Host audit records live under the resolved audit root, by default
 layout:
 
 - `runa/` — preserved runa state written naturally by the runtime
+- `agentd/transcript/events.jsonl` — structured transcript events emitted by
+  runa and runa-mcp when observable
+- `agentd/transcript/transcript.md` — human-readable rendering of the event
+  stream
+- `agentd/transcript/manifest.json` — transcript schema version and coverage:
+  `full`, `missing_mcp_events`, or `outer_streams_only`
 - `agentd/session.json` — agentd-written metadata (`schema_version: 2`,
   `session_id`, `agent`, `repo_url`, optional `work_unit`, timestamps, outcome,
   exit code when applicable) written by atomic temp-file replacement within the
   record directory
 
-Coverage is intentionally scoped to the repo-root `.runa/` tree. That captures
-`runa`'s non-configurable `.runa/store/` and `.runa/workspace/`, so persisted
-runtime state stays inside the audit mount.
+Audit state coverage is intentionally scoped to the repo-root `.runa/` tree.
+That captures `runa`'s non-configurable `.runa/store/` and `.runa/workspace/`,
+so persisted runtime state stays inside the audit mount. Transcript coverage is
+separate: it captures runa's observable execution boundary and only includes
+MCP tool events when the agent runtime actually launches `runa-mcp`.
 
 Retention is intentionally out of scope here. Audit records accumulate
 indefinitely under the resolved audit root; pruning and retention policy are

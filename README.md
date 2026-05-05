@@ -122,8 +122,8 @@ environment — export them before starting the daemon. Additional `mounts`
 entries are bind mounts: `source` must be an absolute existing host path,
 `target` must be an absolute container path, targets must be unique within the
 agent, and runner-managed targets are reserved: `/agentd/methodology`,
-`/home/{agent}`, `/home/{agent}/.agentd`, and `/home/{agent}/repo` plus
-their descendants. Other targets under `/home/{agent}` remain supported,
+`/agentd/transcript`, `/home/{agent}`, `/home/{agent}/.agentd`, and
+`/home/{agent}/repo` plus their descendants. Other targets under `/home/{agent}` remain supported,
 including read-only auth mounts such as `/home/site-builder/.claude`.
 Additional mounts are not relabelled; on SELinux-enabled hosts, operators must
 ensure each host path already has a container-compatible label. Runner-owned
@@ -307,14 +307,22 @@ the container, the agent sees:
 
 The container is force-removed on completion. The session's audit record
 persists on the host under the resolved audit root
-`<audit_root>/<agent>/<session_id>/`, with runa state in `runa/` and agentd
-metadata in `agentd/session.json`. If teardown cleanup fails, or if audit
-finalization attempts closeout and fails, that metadata remains intentionally
-incomplete with no `end_timestamp` or `outcome`. On successful finalization,
-agentd seals persisted runa entries read-only and publishes a read-only
-`session.json` as the final commit point. Ancestor directories remain writable
-so the final same-directory atomic replace can occur. The on-disk metadata does
-not encode which incomplete path occurred; operators should use
+`<audit_root>/<agent>/<session_id>/`, with runa state in `runa/`, agentd
+metadata in `agentd/session.json`, and transcript artifacts in
+`agentd/transcript/`. Transcript artifacts include structured JSON Lines events
+at `events.jsonl`, a human-readable `transcript.md`, and `manifest.json` with
+coverage of `full`, `missing_mcp_events`, or `outer_streams_only`. Full MCP
+tool-call coverage depends on the agent runtime launching `runa-mcp`; otherwise
+the transcript still records the observable runa boundary without claiming MCP
+events that never occurred.
+
+If teardown cleanup fails, or if audit finalization attempts closeout and
+fails, metadata remains intentionally incomplete with no `end_timestamp` or
+`outcome`. On successful finalization, agentd seals persisted runa and
+transcript entries read-only and publishes a read-only `session.json` as the
+final commit point. Ancestor directories remain writable so the final
+same-directory atomic replace can occur. The on-disk metadata does not encode
+which incomplete path occurred; operators should use
 `runner.lifecycle_failure` plus the surrounding `runner.session_outcome`,
 `runner.session_error`, and `runner.session_teardown` events to disambiguate
 cause.

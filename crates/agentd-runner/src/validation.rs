@@ -23,6 +23,7 @@ const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
+const TRANSCRIPT_MOUNT_PATH: &str = "/agentd/transcript";
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if !is_daemon_instance_id(&spec.daemon_instance_id) {
@@ -294,6 +295,7 @@ fn is_reserved_mount_target(target: &Path, agent_name: &str) -> bool {
     let repo_dir = session_repo_dir(agent_name);
     let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
     let invocation_input_dir = Path::new(INVOCATION_INPUT_MOUNT_PATH);
+    let transcript_dir = Path::new(TRANSCRIPT_MOUNT_PATH);
 
     // Each rule states the invariant for one runner-owned path. Intentional
     // overlap is part of the contract: targets like `/home` or `/` can
@@ -307,6 +309,10 @@ fn is_reserved_mount_target(target: &Path, agent_name: &str) -> bool {
     }
 
     if target.starts_with(invocation_input_dir) || invocation_input_dir.starts_with(target) {
+        return true;
+    }
+
+    if target.starts_with(transcript_dir) || transcript_dir.starts_with(target) {
         return true;
     }
 
@@ -610,6 +616,26 @@ mod tests {
         match error {
             RunnerError::ReservedMountTarget { target } => {
                 assert_eq!(target, PathBuf::from("/agentd/invocation-input"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_transcript_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/transcript"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the transcript mount");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd/transcript"));
             }
             other => panic!("expected ReservedMountTarget, got {other:?}"),
         }

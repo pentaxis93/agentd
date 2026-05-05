@@ -1,5 +1,6 @@
 use crate::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use serde::Serialize;
+use serde_json::Value;
 #[cfg(test)]
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
@@ -13,6 +14,7 @@ const METADATA_SCHEMA_VERSION: u32 = 2;
 const ACTIVE_AUDIT_DIRECTORY_MODE: u32 = 0o755;
 const SEALED_FILE_MODE: u32 = 0o444;
 const SEALED_DIRECTORY_MODE: u32 = 0o555;
+const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
 
 #[cfg(test)]
 std::thread_local! {
@@ -24,6 +26,7 @@ std::thread_local! {
 pub(crate) struct SessionAuditRecord {
     pub(crate) record_dir: PathBuf,
     pub(crate) runa_dir: PathBuf,
+    pub(crate) transcript_dir: PathBuf,
     pub(crate) metadata_path: PathBuf,
     pub(crate) session_id: String,
     pub(crate) agent: String,
@@ -72,21 +75,24 @@ fn prepare_session_audit_record_at(
     let record_dir = agent_dir.join(session_id);
     let runa_dir = record_dir.join("runa");
     let agentd_dir = record_dir.join("agentd");
+    let transcript_dir = agentd_dir.join("transcript");
     let metadata_path = agentd_dir.join("session.json");
 
     fs::create_dir_all(&runa_dir)?;
-    fs::create_dir_all(&agentd_dir)?;
+    fs::create_dir_all(&transcript_dir)?;
 
     rollback_record_dir_on_error(&record_dir, || {
         set_active_audit_directory_permissions(&agent_dir)?;
         set_active_audit_directory_permissions(&record_dir)?;
         set_active_audit_directory_permissions(&agentd_dir)?;
+        set_active_runa_permissions(&transcript_dir)?;
         set_active_runa_permissions(&runa_dir)?;
 
         let start_timestamp = current_timestamp()?;
         let record = SessionAuditRecord {
             record_dir: record_dir.clone(),
             runa_dir: runa_dir.clone(),
+            transcript_dir: transcript_dir.clone(),
             metadata_path: metadata_path.clone(),
             session_id: session_id.to_string(),
             agent: spec.agent_name.clone(),
@@ -114,6 +120,20 @@ pub(crate) fn finalize_session_audit_record(
 
     seal_session_audit_record(record)?;
     write_finalized_session_audit_metadata(record, &end_timestamp, outcome, exit_code)
+}
+
+pub(crate) fn finalize_session_transcript(record: &SessionAuditRecord) -> Result<(), RunnerError> {
+    fs::create_dir_all(&record.transcript_dir)?;
+    let events_path = record.transcript_dir.join("events.jsonl");
+    let events = match fs::read_to_string(&events_path) {
+        Ok(events) => events,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let coverage = transcript_coverage(&events);
+    write_transcript_manifest(record, coverage)?;
+    write_transcript_markdown(record, &events)?;
+    Ok(())
 }
 
 fn write_session_audit_metadata(
@@ -169,6 +189,78 @@ fn current_timestamp() -> Result<String, RunnerError> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|error| RunnerError::Io(std::io::Error::other(error)))
+}
+
+#[derive(Debug, Serialize)]
+struct TranscriptManifest<'a> {
+    schema_version: u32,
+    coverage: &'a str,
+}
+
+fn write_transcript_manifest(
+    record: &SessionAuditRecord,
+    coverage: &str,
+) -> Result<(), RunnerError> {
+    let manifest = TranscriptManifest {
+        schema_version: TRANSCRIPT_SCHEMA_VERSION,
+        coverage,
+    };
+    let mut payload = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| RunnerError::Io(std::io::Error::other(error)))?;
+    payload.push(b'\n');
+    fs::write(record.transcript_dir.join("manifest.json"), payload)?;
+    Ok(())
+}
+
+fn write_transcript_markdown(record: &SessionAuditRecord, events: &str) -> Result<(), RunnerError> {
+    let mut markdown = String::from("# Session Transcript\n\n");
+    if events.trim().is_empty() {
+        markdown.push_str("_No structured transcript events were emitted._\n");
+    } else {
+        for line in events.lines().filter(|line| !line.trim().is_empty()) {
+            match serde_json::from_str::<Value>(line) {
+                Ok(event) => {
+                    let kind = event.get("kind").and_then(Value::as_str).unwrap_or("event");
+                    markdown.push_str("## ");
+                    markdown.push_str(kind);
+                    markdown.push_str("\n\n");
+                    if let Some(content) = event.get("content").and_then(Value::as_str) {
+                        markdown.push_str("```text\n");
+                        markdown.push_str(content);
+                        if !content.ends_with('\n') {
+                            markdown.push('\n');
+                        }
+                        markdown.push_str("```\n\n");
+                    } else {
+                        markdown.push_str("```json\n");
+                        markdown.push_str(line);
+                        markdown.push_str("\n```\n\n");
+                    }
+                }
+                Err(_) => {
+                    markdown.push_str("## unparsed_event\n\n```text\n");
+                    markdown.push_str(line);
+                    markdown.push_str("\n```\n\n");
+                }
+            }
+        }
+    }
+    fs::write(record.transcript_dir.join("transcript.md"), markdown)?;
+    Ok(())
+}
+
+fn transcript_coverage(events: &str) -> &'static str {
+    if events.trim().is_empty() {
+        return "outer_streams_only";
+    }
+    if events
+        .lines()
+        .any(|line| line.contains("\"source\":\"runa-mcp\""))
+    {
+        "full"
+    } else {
+        "missing_mcp_events"
+    }
 }
 
 fn rollback_record_dir_on_error<T, F>(record_dir: &Path, init: F) -> Result<T, RunnerError>

@@ -10,7 +10,7 @@ use crate::input::{INVOCATION_INPUT_MOUNT_PATH, ResolvedInvocationInput};
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::naming::{SESSION_ID_LEN, format_secret_name};
 use crate::podman::run_podman_command_with_input;
-use crate::session_paths::session_internal_audit_runa_dir;
+use crate::session_paths::{session_internal_audit_runa_dir, session_transcript_mount_dir};
 use crate::types::{RunnerError, SessionInvocation, SessionSpec};
 use crate::validation::REPO_TOKEN_ENV;
 use getrandom::fill as fill_random_bytes;
@@ -47,6 +47,7 @@ pub(crate) struct SessionResources {
     pub(crate) methodology_mount_source: PathBuf,
     pub(crate) audit_record: SessionAuditRecord,
     pub(crate) audit_mount: PreparedBindMount,
+    pub(crate) transcript_mount: PreparedBindMount,
     pub(crate) invocation_input_mount: Option<PreparedBindMount>,
     pub(crate) additional_mounts: Vec<PreparedBindMount>,
     pub(crate) environment_secret_bindings: Vec<SecretBinding>,
@@ -122,6 +123,17 @@ pub(crate) fn prepare_session_resources(
             ));
         }
     };
+    let transcript_mount = match create_transcript_mount(&audit_record) {
+        Ok(mount) => mount,
+        Err(error) => {
+            return Err(rollback_failed_staging_dir_allocation(
+                container_name,
+                session_id,
+                &methodology_staging_dir,
+                error,
+            ));
+        }
+    };
     let methodology_mount_source =
         match canonical_mount_source(&spec.methodology_dir).and_then(|path| {
             validate_shared_relabel_mount_source(&path)?;
@@ -166,6 +178,7 @@ pub(crate) fn prepare_session_resources(
         methodology_mount_source,
         audit_record,
         audit_mount,
+        transcript_mount,
         invocation_input_mount,
         additional_mounts,
         environment_secret_bindings: Vec::new(),
@@ -350,6 +363,17 @@ fn create_audit_mount(
     )
 }
 
+fn create_transcript_mount(
+    audit_record: &SessionAuditRecord,
+) -> Result<PreparedBindMount, RunnerError> {
+    create_direct_prepared_bind_mount(
+        &audit_record.transcript_dir,
+        session_transcript_mount_dir(),
+        false,
+        true,
+    )
+}
+
 fn create_invocation_input_mount(
     resolved_input: Option<&ResolvedInvocationInput>,
     staging_dir: &Path,
@@ -518,18 +542,15 @@ mod tests {
     fn test_audit_record(session_id: &str) -> SessionAuditRecord {
         let record_dir = std::env::temp_dir().join(format!("agentd-audit-record-{session_id}"));
         let runa_dir = record_dir.join("runa");
+        let transcript_dir = record_dir.join("agentd/transcript");
         let metadata_path = record_dir.join("agentd/session.json");
         std::fs::create_dir_all(&runa_dir).expect("test runa dir should be created");
-        std::fs::create_dir_all(
-            metadata_path
-                .parent()
-                .expect("metadata path should have a parent"),
-        )
-        .expect("test metadata dir should be created");
+        std::fs::create_dir_all(&transcript_dir).expect("test transcript dir should be created");
 
         SessionAuditRecord {
             record_dir,
             runa_dir,
+            transcript_dir,
             metadata_path,
             session_id: session_id.to_string(),
             agent: "site-builder".to_string(),

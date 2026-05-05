@@ -14,7 +14,7 @@ use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
 use crate::session_paths::{
     session_home_dir, session_internal_audit_dir, session_internal_audit_runa_dir,
-    session_repo_dir, session_repo_runa_dir,
+    session_repo_dir, session_repo_runa_dir, session_transcript_mount_dir,
 };
 use crate::types::{BindMount, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
@@ -33,6 +33,8 @@ const SESSION_GROUP_ID: u32 = 1000;
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const METHODOLOGY_MANIFEST_PATH: &str = "/agentd/methodology/manifest.toml";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
+const TRANSCRIPT_DIR_ENV: &str = "RUNA_TRANSCRIPT_DIR";
+const TRANSCRIPT_REDACT_ENV: &str = "RUNA_TRANSCRIPT_REDACT_ENV";
 
 pub(crate) fn create_container(
     resources: &SessionResources,
@@ -226,6 +228,17 @@ fn build_container_script(
     } else {
         script.push_str("\nunset AGENTD_WORK_UNIT");
     }
+    script.push_str("\nexport ");
+    script.push_str(TRANSCRIPT_DIR_ENV);
+    script.push('=');
+    script.push_str(&shell_quote(
+        &session_transcript_mount_dir().display().to_string(),
+    ));
+    let redact_env = transcript_redact_environment(spec, invocation);
+    script.push_str("\nexport ");
+    script.push_str(TRANSCRIPT_REDACT_ENV);
+    script.push('=');
+    script.push_str(&shell_quote(&redact_env));
     script.push_str("\ngosu ");
     script.push_str(&shell_quote(&user_group));
     script.push_str(" runa init --methodology ");
@@ -334,6 +347,22 @@ fn build_clone_command(invocation: &SessionInvocation, repo_dir: &str) -> String
     command
 }
 
+fn transcript_redact_environment(spec: &SessionSpec, invocation: &SessionInvocation) -> String {
+    let mut names = spec
+        .environment
+        .iter()
+        .map(|variable| variable.name.as_str())
+        .collect::<Vec<_>>();
+    if invocation
+        .repo_token
+        .as_deref()
+        .is_some_and(|token| !token.is_empty())
+    {
+        names.push(REPO_TOKEN_ENV);
+    }
+    names.join(",")
+}
+
 fn build_create_container_args(
     resources: &SessionResources,
     spec: &SessionSpec,
@@ -357,6 +386,7 @@ fn build_create_container_args(
     );
 
     push_prepared_bind_mount_arg(&mut args, &resources.audit_mount);
+    push_prepared_bind_mount_arg(&mut args, &resources.transcript_mount);
 
     if let Some(mount) = &resources.invocation_input_mount {
         push_prepared_bind_mount_arg(&mut args, mount);
