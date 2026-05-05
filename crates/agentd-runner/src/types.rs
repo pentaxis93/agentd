@@ -30,7 +30,8 @@ pub struct SessionSpec {
     pub agent_name: String,
     /// Container image reference. The image must provide `/bin/sh`, `git`,
     /// `find`, and the setup/session binaries required by the configured
-    /// agent command in `PATH`, including `useradd` and `gosu`.
+    /// agent command in `PATH`, including `groupadd`, `useradd`, and `gosu`.
+    /// UID/GID `1000` must be available for the session user.
     pub base_image: String,
     /// Host-side path to the methodology directory. Mounted read-only into
     /// the container at `/agentd/methodology`. Must contain `manifest.toml`.

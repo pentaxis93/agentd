@@ -18,6 +18,8 @@ use agentd_runner::{
 use serde_json::Value;
 
 const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
+const SESSION_USER_ID: u32 = 1000;
+const SESSION_GROUP_ID: u32 = 1000;
 
 fn run_session_with_test_audit_root(
     audit_root: &Path,
@@ -1534,18 +1536,7 @@ fn probe_direct_audit_sealing() -> bool {
     // deployment when the host test process can chmod files written by the
     // session user's mapped UID.
     let status = Command::new("podman")
-        .args([
-            "run",
-            "--rm",
-            "--user",
-            "1000:1000",
-            "-v",
-            &mount_arg,
-            "docker.io/library/debian:bookworm-slim",
-            "sh",
-            "-lc",
-            "printf 'probe\\n' > /audit/probe-file",
-        ])
+        .args(probe_direct_audit_sealing_args(&mount_arg))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -1559,6 +1550,37 @@ fn probe_direct_audit_sealing() -> bool {
 
     let _ = fs::remove_dir_all(&audit_root);
     can_seal
+}
+
+fn probe_direct_audit_sealing_args(mount_arg: &str) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--userns".to_string(),
+        format!("keep-id:uid={SESSION_USER_ID},gid={SESSION_GROUP_ID}"),
+        "--user".to_string(),
+        format!("{SESSION_USER_ID}:{SESSION_GROUP_ID}"),
+        "-v".to_string(),
+        mount_arg.to_string(),
+        "docker.io/library/debian:bookworm-slim".to_string(),
+        "sh".to_string(),
+        "-lc".to_string(),
+        "printf 'probe\\n' > /audit/probe-file".to_string(),
+    ]
+}
+
+#[test]
+fn direct_audit_sealing_probe_maps_daemon_identity_to_session_user_id() {
+    let args = probe_direct_audit_sealing_args("/tmp/audit:/audit:Z");
+
+    let userns_index = args
+        .iter()
+        .position(|arg| arg == "--userns")
+        .expect("podman probe should receive --userns");
+    assert_eq!(
+        args.get(userns_index + 1).map(String::as_str),
+        Some("keep-id:uid=1000,gid=1000")
+    );
 }
 
 fn podman_test_lock() -> &'static Mutex<()> {
@@ -1971,6 +1993,8 @@ case "$command_name" in
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-repo-audit-state" ]; then
             [ -L "${HOME}/repo/.runa" ]
             [ "$(readlink "${HOME}/repo/.runa")" = "${HOME}/.agentd/audit/runa" ]
+            [ "$(stat -Lc '%u:%g' "${HOME}/repo/.runa")" = "$(id -u):$(id -g)" ]
+            [ -w "${HOME}/repo/.runa" ]
             mkdir -p "${HOME}/repo/.runa/workspace" "${HOME}/repo/.runa/store/executions"
             printf 'persisted through repo bridge\n' > "${HOME}/repo/.runa/workspace/session-artifact.txt"
             printf '{"protocols":["begin"],"postconditions":["passed"]}\n' > "${HOME}/repo/.runa/store/executions/0001.json"

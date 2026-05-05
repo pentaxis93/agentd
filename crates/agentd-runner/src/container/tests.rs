@@ -121,6 +121,52 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
 }
 
 #[test]
+fn create_container_args_map_daemon_identity_to_session_user_id() {
+    let args = build_create_container_args(
+        &SessionResources {
+            container_name: "agentd-agent-session".to_string(),
+            methodology_staging_dir: PathBuf::from("/tmp/staging"),
+            methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+            audit_record: test_audit_record(),
+            audit_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/audit-runa"),
+                target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
+            invocation_input_mount: None,
+            additional_mounts: Vec::new(),
+            environment_secret_bindings: Vec::new(),
+            repo_token_secret_binding: None,
+        },
+        &test_session_spec(),
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+        None,
+    );
+
+    let userns_index = args
+        .iter()
+        .position(|arg| arg == "--userns")
+        .expect("podman create should receive --userns");
+    assert_eq!(
+        args.get(userns_index + 1).map(String::as_str),
+        Some("keep-id:uid=1000,gid=1000")
+    );
+
+    let image_index = args
+        .iter()
+        .position(|arg| arg == "image")
+        .expect("podman create should include the base image");
+    assert!(userns_index < image_index);
+}
+
+#[test]
 fn create_container_args_pass_shell_flags_after_image_argument() {
     let spec = test_session_spec();
     let invocation = SessionInvocation {
@@ -290,7 +336,8 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
     );
 
     assert!(script.contains(
-        "useradd --create-home --home-dir '/home/myagent' --shell /bin/sh --user-group 'myagent'"
+        "groupadd --gid 1000 'myagent'\n\
+         useradd --create-home --home-dir '/home/myagent' --shell /bin/sh --uid 1000 --gid 'myagent' 'myagent'"
     ));
     assert!(script.contains("\nmkdir -p '/home/myagent/.agentd/audit'\n"));
     assert!(script.contains(

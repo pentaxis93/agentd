@@ -128,10 +128,11 @@ targets under `/home/{agent}` remain supported, including read-only auth
 mounts such as `/home/site-builder/.claude`. Additional mounts are not
 relabelled; on SELinux-enabled hosts, operators must ensure each host path
 already has a container-compatible label. The base image must provide
-`/bin/sh`, `find`, `git`, `useradd`, `gosu`, `runa`, and whatever binaries the
-declared agent command uses. When an agent declares `schedule`, it must
-also declare `repo`. Schedules are evaluated in daemon-local time and missed
-fires are not backfilled after downtime. Persistent audit records default to
+`/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, `runa`, and whatever
+binaries the declared agent command uses. UID/GID `1000` must be available for
+the session user. When an agent declares `schedule`, it must also declare
+`repo`. Schedules are evaluated in daemon-local time and missed fires are not
+backfilled after downtime. Persistent audit records default to
 `$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set
 `daemon.audit_root` to override that for system installations.
 
@@ -189,15 +190,15 @@ absolute paths recorded in `agentd.toml` or used by `TMPDIR`.
 Audit sealing is performed by the daemon process with direct filesystem chmod
 operations; it does not enter Podman's user namespace during finalization. The
 startup probe verifies the daemon can create, chmod, restore, and remove its
-own probe entries under `audit_root`. That probe is necessary but not
-sufficient: deployment must also ensure files written by session containers are
-within the daemon's chmod authority. The primary supported contract is UID
-alignment. For a default rootless Podman map, session container UID `N > 0`
-appears on the host as `subuid_start + (N - 1)`, so the daemon's effective host
-identity must match the mapped writer UID for the unprivileged agent user, or
-the daemon must receive equivalent authority such as `CAP_FOWNER` over the
-audit tree. That same daemon identity still needs access to the mounted Podman
-socket and configured runtime paths.
+own probe entries under `audit_root`. Session containers are created with
+`--userns keep-id:uid=1000,gid=1000`, and agentd creates the in-container
+session user at UID/GID `1000`. The audit mount therefore appears owned by the
+same identity that runs `runa init`, and session-written audit files remain
+within the daemon's host-side chmod authority. This is a single-tenant security
+tradeoff: compared with default rootless subuid mapping, a session-user escape
+has the daemon's host-file authority over daemon-owned paths. That daemon
+identity still needs access to the mounted Podman socket and configured runtime
+paths.
 
 A host-installed `agentd` binary remains useful as a same-build CLI client for
 `agentd run`, but host-binary daemon supervision is out of band for supported
