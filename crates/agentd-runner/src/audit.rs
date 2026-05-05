@@ -516,6 +516,13 @@ fn set_active_audit_directory_permissions(path: &Path) -> Result<(), RunnerError
 }
 
 fn prepare_transcript_tree_for_finalization(path: &Path) -> Result<(), RunnerError> {
+    ensure_transcript_directory(path)?;
+    prepare_audit_tree_for_traversal(path)?;
+    preflight_validate_sealable_tree(path)?;
+    repair_transcript_path_permissions(path)
+}
+
+fn ensure_transcript_directory(path: &Path) -> Result<(), RunnerError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -531,7 +538,7 @@ fn prepare_transcript_tree_for_finalization(path: &Path) -> Result<(), RunnerErr
         Err(error) => return Err(RunnerError::Io(error)),
     }
 
-    repair_transcript_path_permissions(path)
+    Ok(())
 }
 
 fn repair_transcript_path_permissions(path: &Path) -> Result<(), RunnerError> {
@@ -1472,6 +1479,63 @@ mod tests {
         )
         .expect("manifest should be json");
         assert_eq!(manifest["coverage"], "full");
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_refuses_hard_linked_events_jsonl_without_chmoding_target() {
+        let root = unique_test_dir("agentd-audit-transcript-hard-link");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "transcript-hard-link",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let runa_target = record.runa_dir.join("events-source.jsonl");
+        fs::write(
+            &runa_target,
+            "{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\"}\n",
+        )
+        .expect("runa target should be created");
+        fs::set_permissions(&runa_target, fs::Permissions::from_mode(0o000))
+            .expect("runa target should start unreadable");
+        fs::hard_link(&runa_target, record.transcript_dir.join("events.jsonl"))
+            .expect("hard-linked transcript events should be created");
+
+        let before_mode = fs::metadata(&runa_target)
+            .expect("runa target metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        let result = super::finalize_session_transcript(&record);
+
+        let after_mode = fs::metadata(&runa_target)
+            .expect("runa target metadata should exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        if after_mode == 0o000 {
+            let _ = fs::set_permissions(&runa_target, fs::Permissions::from_mode(0o600));
+        }
+        let error =
+            result.expect_err("hard-linked transcript events should fail before permission repair");
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to seal multi-linked audit entry"),
+            "error should come from hard-link preflight: {error}"
+        );
+        assert_eq!(before_mode, 0o000);
+        assert_eq!(after_mode, 0o000);
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
     }
