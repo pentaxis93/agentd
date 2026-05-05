@@ -48,6 +48,9 @@ pub struct SessionSpec {
     /// Caller-resolved environment variables injected into the container.
     /// Non-empty values are passed via ephemeral podman secrets; empty values
     /// are passed as direct `--env` assignments.
+    /// Names reserved for runner-owned values such as `AGENT_NAME`,
+    /// `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`, and
+    /// `RUNA_TRANSCRIPT_REDACT_ENV` are rejected during validation.
     pub environment: Vec<ResolvedEnvironmentVariable>,
 }
 
@@ -70,7 +73,7 @@ pub struct BindMount {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedEnvironmentVariable {
     /// Variable name. Must not be empty, contain `,` or `=`, or collide with
-    /// runner-managed names (currently `AGENT_NAME`).
+    /// runner-managed names.
     pub name: String,
     /// Variable value. Empty values are legal and are injected as direct
     /// `--env NAME=` assignments rather than podman secrets, which reject
@@ -408,10 +411,20 @@ impl fmt::Display for RunnerError {
                 "environment variable names must not be empty and must not contain ',' or '=': {name}"
             ),
             RunnerError::ReservedEnvironmentName { name } => {
-                write!(
-                    f,
-                    "environment variable name is reserved by the runner: {name}"
-                )
+                if matches!(
+                    name.as_str(),
+                    "RUNA_TRANSCRIPT_DIR" | "RUNA_TRANSCRIPT_REDACT_ENV"
+                ) {
+                    write!(
+                        f,
+                        "environment variable name is reserved by the runner: {name} (runner-owned; set internally by transcript subsystem)"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "environment variable name is reserved by the runner: {name}"
+                    )
+                }
             }
             RunnerError::InvalidMountSource { path } => {
                 write!(

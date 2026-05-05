@@ -3,9 +3,10 @@ use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use std::cell::Cell;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -15,6 +16,9 @@ const ACTIVE_AUDIT_DIRECTORY_MODE: u32 = 0o755;
 const SEALED_FILE_MODE: u32 = 0o444;
 const SEALED_DIRECTORY_MODE: u32 = 0o555;
 const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
+const EVENTS_ARTIFACT: &str = "events.jsonl";
+const MANIFEST_ARTIFACT: &str = "manifest.json";
+const MARKDOWN_ARTIFACT: &str = "transcript.md";
 
 #[cfg(test)]
 std::thread_local! {
@@ -55,6 +59,18 @@ struct SessionAuditMetadata<'a> {
     outcome: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
+}
+
+#[derive(Debug)]
+struct TranscriptFinalizationFailure {
+    artifact: &'static str,
+    error: RunnerError,
+}
+
+impl fmt::Display for TranscriptFinalizationFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
 }
 
 pub(crate) fn prepare_session_audit_record(
@@ -124,18 +140,27 @@ pub(crate) fn finalize_session_audit_record(
 
 pub(crate) fn finalize_session_transcript(record: &SessionAuditRecord) -> Result<(), RunnerError> {
     fs::create_dir_all(&record.transcript_dir)?;
-    let events_path = record.transcript_dir.join("events.jsonl");
-    let events = match fs::read_to_string(&events_path) {
-        Ok(events) => events,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::write(&events_path, [])?;
-            String::new()
+    match finalize_session_transcript_artifacts(record) {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            let failure_message = failure.to_string();
+            if failure.artifact != MANIFEST_ARTIFACT {
+                write_transcript_manifest(record, "finalization_failed", Some(&failure_message))
+                    .map_err(|manifest_failure| manifest_failure.error)?;
+            }
+            Err(failure.error)
         }
-        Err(error) => return Err(error.into()),
-    };
+    }
+}
+
+fn finalize_session_transcript_artifacts(
+    record: &SessionAuditRecord,
+) -> Result<(), TranscriptFinalizationFailure> {
+    let events_path = record.transcript_dir.join(EVENTS_ARTIFACT);
+    let events = read_or_create_transcript_events(&events_path)?;
     let coverage = transcript_coverage(&events);
-    write_transcript_manifest(record, coverage)?;
     write_transcript_markdown(record, &events)?;
+    write_transcript_manifest(record, coverage, None)?;
     Ok(())
 }
 
@@ -198,24 +223,42 @@ fn current_timestamp() -> Result<String, RunnerError> {
 struct TranscriptManifest<'a> {
     schema_version: u32,
     coverage: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finalization_error: Option<&'a str>,
+}
+
+fn write_transcript_manifest_payload(
+    record: &SessionAuditRecord,
+    manifest: TranscriptManifest<'_>,
+) -> Result<(), TranscriptFinalizationFailure> {
+    let mut payload = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| artifact_failure(MANIFEST_ARTIFACT, std::io::Error::other(error)))?;
+    payload.push(b'\n');
+    write_new_transcript_artifact(
+        &record.transcript_dir.join(MANIFEST_ARTIFACT),
+        MANIFEST_ARTIFACT,
+        &payload,
+    )?;
+    Ok(())
 }
 
 fn write_transcript_manifest(
     record: &SessionAuditRecord,
     coverage: &str,
-) -> Result<(), RunnerError> {
+    finalization_error: Option<&str>,
+) -> Result<(), TranscriptFinalizationFailure> {
     let manifest = TranscriptManifest {
         schema_version: TRANSCRIPT_SCHEMA_VERSION,
         coverage,
+        finalization_error,
     };
-    let mut payload = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| RunnerError::Io(std::io::Error::other(error)))?;
-    payload.push(b'\n');
-    fs::write(record.transcript_dir.join("manifest.json"), payload)?;
-    Ok(())
+    write_transcript_manifest_payload(record, manifest)
 }
 
-fn write_transcript_markdown(record: &SessionAuditRecord, events: &str) -> Result<(), RunnerError> {
+fn write_transcript_markdown(
+    record: &SessionAuditRecord,
+    events: &str,
+) -> Result<(), TranscriptFinalizationFailure> {
     let mut markdown = String::from("# Session Transcript\n\n");
     if events.trim().is_empty() {
         markdown.push_str("_No structured transcript events were emitted._\n");
@@ -240,8 +283,108 @@ fn write_transcript_markdown(record: &SessionAuditRecord, events: &str) -> Resul
             }
         }
     }
-    fs::write(record.transcript_dir.join("transcript.md"), markdown)?;
+    write_new_transcript_artifact(
+        &record.transcript_dir.join(MARKDOWN_ARTIFACT),
+        MARKDOWN_ARTIFACT,
+        markdown.as_bytes(),
+    )?;
     Ok(())
+}
+
+fn read_or_create_transcript_events(path: &Path) -> Result<String, TranscriptFinalizationFailure> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_empty_transcript_artifact(path, EVENTS_ARTIFACT)?;
+            return Ok(String::new());
+        }
+        Err(error) => return Err(artifact_failure(EVENTS_ARTIFACT, error)),
+    };
+
+    if !metadata.is_file() {
+        return Err(unsafe_artifact_failure(
+            EVENTS_ARTIFACT,
+            "is not a regular file",
+        ));
+    }
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) => unsafe_artifact_failure(EVENTS_ARTIFACT, "is not a regular file"),
+            _ => artifact_failure(EVENTS_ARTIFACT, error),
+        })?;
+    if !file
+        .metadata()
+        .map_err(|error| artifact_failure(EVENTS_ARTIFACT, error))?
+        .is_file()
+    {
+        return Err(unsafe_artifact_failure(
+            EVENTS_ARTIFACT,
+            "is not a regular file",
+        ));
+    }
+
+    let mut events = String::new();
+    file.read_to_string(&mut events)
+        .map_err(|error| artifact_failure(EVENTS_ARTIFACT, error))?;
+    Ok(events)
+}
+
+fn create_empty_transcript_artifact(
+    path: &Path,
+    artifact: &'static str,
+) -> Result<(), TranscriptFinalizationFailure> {
+    let file = create_new_transcript_artifact(path, artifact)?;
+    drop(file);
+    Ok(())
+}
+
+fn write_new_transcript_artifact(
+    path: &Path,
+    artifact: &'static str,
+    payload: &[u8],
+) -> Result<(), TranscriptFinalizationFailure> {
+    let mut file = create_new_transcript_artifact(path, artifact)?;
+    file.write_all(payload)
+        .map_err(|error| artifact_failure(artifact, error))?;
+    Ok(())
+}
+
+fn create_new_transcript_artifact(
+    path: &Path,
+    artifact: &'static str,
+) -> Result<File, TranscriptFinalizationFailure> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                unsafe_artifact_failure(artifact, "already exists")
+            } else {
+                artifact_failure(artifact, error)
+            }
+        })
+}
+
+fn artifact_failure(
+    artifact: &'static str,
+    error: std::io::Error,
+) -> TranscriptFinalizationFailure {
+    TranscriptFinalizationFailure {
+        artifact,
+        error: RunnerError::Io(error),
+    }
+}
+
+fn unsafe_artifact_failure(artifact: &'static str, reason: &str) -> TranscriptFinalizationFailure {
+    artifact_failure(
+        artifact,
+        std::io::Error::other(format!("unsafe transcript artifact: {artifact} {reason}")),
+    )
 }
 
 fn push_fenced_code_block(markdown: &mut String, language: &str, content: &str) {
@@ -508,6 +651,9 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1122,6 +1268,191 @@ mod tests {
         )
         .expect("manifest should be json");
         assert_eq!(manifest["coverage"], "outer_streams_only");
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_rejects_symlinked_events_jsonl_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("agentd-audit-symlinked-transcript-events");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "symlinked-events",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let outside_target = root.join("outside-events.jsonl");
+        fs::write(&outside_target, "outside secret\n").expect("outside target should be created");
+        symlink(&outside_target, record.transcript_dir.join("events.jsonl"))
+            .expect("symlinked events artifact should be created");
+
+        let error = super::finalize_session_transcript(&record)
+            .expect_err("symlinked transcript events should fail finalization");
+
+        assert!(
+            error.to_string().contains("events.jsonl"),
+            "error should name the unsafe artifact: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_target).expect("outside target should remain readable"),
+            "outside secret\n"
+        );
+        assert_eq!(
+            fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("failure manifest should be written"),
+            "{\n  \"schema_version\": 1,\n  \"coverage\": \"finalization_failed\",\n  \"finalization_error\": \"unsafe transcript artifact: events.jsonl is not a regular file\"\n}\n"
+        );
+
+        fs::remove_file(record.transcript_dir.join("events.jsonl"))
+            .expect("symlink should be removable");
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_rejects_fifo_events_jsonl_without_hanging() {
+        let root = unique_test_dir("agentd-audit-fifo-transcript-events");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "fifo-events",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let fifo_path = record.transcript_dir.join("events.jsonl");
+        let status = Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .expect("mkfifo should run");
+        assert!(status.success(), "mkfifo should create events fifo");
+
+        let finalize_record = record.clone();
+        let handle = thread::spawn(move || super::finalize_session_transcript(&finalize_record));
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline && !handle.is_finished() {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            handle.is_finished(),
+            "transcript finalization must not hang on fifo events"
+        );
+        let error = handle
+            .join()
+            .expect("finalization thread should not panic")
+            .expect_err("fifo transcript events should fail finalization");
+        assert!(
+            error.to_string().contains("events.jsonl"),
+            "error should name the unsafe artifact: {error}"
+        );
+
+        fs::remove_file(&fifo_path).expect("fifo should be removable");
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_rejects_preexisting_transcript_markdown_without_overwriting_it()
+    {
+        let root = unique_test_dir("agentd-audit-preexisting-transcript-markdown");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "preexisting-markdown",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        fs::write(
+            record.transcript_dir.join("events.jsonl"),
+            "{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\"}\n",
+        )
+        .expect("events jsonl should be created");
+        fs::write(record.transcript_dir.join("transcript.md"), "preexisting\n")
+            .expect("preexisting markdown should be created");
+
+        let error = super::finalize_session_transcript(&record)
+            .expect_err("preexisting markdown should fail finalization");
+
+        assert!(
+            error.to_string().contains("transcript.md"),
+            "error should name the preexisting artifact: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(record.transcript_dir.join("transcript.md"))
+                .expect("preexisting markdown should remain readable"),
+            "preexisting\n"
+        );
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("failure manifest should be written"),
+        )
+        .expect("failure manifest should be json");
+        assert_eq!(manifest["coverage"], "finalization_failed");
+        assert!(
+            manifest["finalization_error"]
+                .as_str()
+                .expect("failure error should be a string")
+                .contains("transcript.md")
+        );
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_rejects_preexisting_manifest_without_overwriting_it() {
+        let root = unique_test_dir("agentd-audit-preexisting-transcript-manifest");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "preexisting-manifest",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        fs::write(
+            record.transcript_dir.join("events.jsonl"),
+            "{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\"}\n",
+        )
+        .expect("events jsonl should be created");
+        fs::write(record.transcript_dir.join("manifest.json"), "preexisting\n")
+            .expect("preexisting manifest should be created");
+
+        let error = super::finalize_session_transcript(&record)
+            .expect_err("preexisting manifest should fail finalization");
+
+        assert!(
+            error.to_string().contains("manifest.json"),
+            "error should name the preexisting artifact: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("preexisting manifest should remain readable"),
+            "preexisting\n"
+        );
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
     }

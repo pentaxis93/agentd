@@ -311,10 +311,10 @@ persists on the host under the resolved audit root
 metadata in `agentd/session.json`, and transcript artifacts in
 `agentd/transcript/`. Transcript artifacts include structured JSON Lines events
 at `events.jsonl`, a human-readable `transcript.md`, and `manifest.json` with
-coverage of `full`, `missing_mcp_events`, or `outer_streams_only`. Full MCP
-tool-call coverage depends on the agent runtime launching `runa-mcp`; otherwise
-the transcript still records the observable runa boundary without claiming MCP
-events that never occurred.
+coverage of `full`, `missing_mcp_events`, `outer_streams_only`, or
+`finalization_failed`. Full MCP tool-call coverage depends on the agent runtime
+launching `runa-mcp`; otherwise the transcript still records the observable runa
+boundary without claiming MCP events that never occurred.
 
 If teardown cleanup fails, or if audit finalization attempts closeout and
 fails, metadata remains intentionally incomplete with no `end_timestamp` or

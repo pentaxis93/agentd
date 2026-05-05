@@ -1590,8 +1590,13 @@ source = "AGENTD_GITHUB_TOKEN"
 
 #[test]
 fn rejects_reserved_credential_names() {
-    let error = Config::from_str(
-        r#"
+    for reserved_name in [
+        "AGENT_NAME",
+        "RUNA_TRANSCRIPT_DIR",
+        "RUNA_TRANSCRIPT_REDACT_ENV",
+    ] {
+        let config = format!(
+            r#"
 [[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
@@ -1601,18 +1606,32 @@ methodology_dir = "../groundwork"
 argv = ["site-builder", "exec"]
 
 [[agents.credentials]]
-name = "AGENT_NAME"
+name = "{reserved_name}"
 source = "AGENTD_GITHUB_TOKEN"
 "#,
-    )
-    .expect_err("runner-reserved credential names should be rejected");
+        );
+        let error = Config::from_str(&config)
+            .expect_err("runner-reserved credential names should be rejected");
 
-    match error {
-        ConfigError::InvalidCredentialName { agent, name } => {
-            assert_eq!(agent, "site-builder");
-            assert_eq!(name, "AGENT_NAME");
+        match &error {
+            ConfigError::InvalidCredentialName { agent, name } => {
+                assert_eq!(agent, "site-builder");
+                assert_eq!(name, reserved_name);
+            }
+            other => panic!("expected invalid credential name error, got {other}"),
         }
-        other => panic!("expected invalid credential name error, got {other}"),
+
+        let message = error.to_string();
+        assert!(
+            message.contains(reserved_name),
+            "reserved credential error should name {reserved_name}: {message}"
+        );
+        if reserved_name.starts_with("RUNA_TRANSCRIPT_") {
+            assert!(
+                message.contains("transcript subsystem") && message.contains("set internally"),
+                "transcript reserved credential error should explain ownership: {message}"
+            );
+        }
     }
 }
 

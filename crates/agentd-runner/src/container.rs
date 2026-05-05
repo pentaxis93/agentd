@@ -17,7 +17,9 @@ use crate::session_paths::{
     session_repo_dir, session_repo_runa_dir, session_transcript_mount_dir,
 };
 use crate::types::{BindMount, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
-use crate::validation::{REPO_TOKEN_ENV, runner_managed_environment};
+use crate::validation::{
+    REPO_TOKEN_ENV, TRANSCRIPT_DIR_ENV, TRANSCRIPT_REDACT_ENV, runner_managed_environment,
+};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -33,8 +35,6 @@ const SESSION_GROUP_ID: u32 = 1000;
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const METHODOLOGY_MANIFEST_PATH: &str = "/agentd/methodology/manifest.toml";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
-const TRANSCRIPT_DIR_ENV: &str = "RUNA_TRANSCRIPT_DIR";
-const TRANSCRIPT_REDACT_ENV: &str = "RUNA_TRANSCRIPT_REDACT_ENV";
 
 pub(crate) fn create_container(
     resources: &SessionResources,
