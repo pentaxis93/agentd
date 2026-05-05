@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- Container image builds now expose OCI labels and `org.tesserine.agentd.ref`
+  so operators can inspect the daemon source ref from image metadata.
 - Session audit records now include agentd-managed transcript artifacts under
   `agentd/transcript/`, with structured events, a human-readable Markdown
   rendering, and a coverage manifest.
@@ -18,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deployment documentation now requires image builds to pin immutable tags or
+  full SHAs instead of mutable branch refs such as `main`.
 - The supported daemon deployment shape is now a locally built container image
   for Quadlet-managed operation; host-installed daemon supervision is out of
   band, while `agentd run` remains a host-side same-build client.
