@@ -179,7 +179,7 @@ The runner prepares the execution environment:
 2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
 3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
 4. Mounts the configured methodology directory read-only.
-5. Creates an unprivileged unix user whose username is the configured agent name, with home directory `/home/{username}`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before `runa init` and the agent command start. Base images that lack `/bin/sh`, `find`, `git`, `useradd`, `gosu`, or `runa` are not supported.
+5. Creates an unprivileged unix user whose username is the configured agent name, with home directory `/home/{username}` and UID/GID `1000`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `groupadd`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, and `git://` repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before `runa init` and the agent command start. Base images that lack `/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, or `runa`, or that cannot reserve UID/GID `1000` for the session user, are not supported.
 6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{agent}/{session_id}/`, writes start metadata to `agentd/session.json`, and bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa` before the runtime initializes runa state.
 7. Recursively transfers ownership of pre-existing content under `/home/{username}` while pruning host-backed bind-mount targets, the runner-owned audit leaf `/home/{username}/.agentd/audit/runa`, and `/home/{username}/repo`, then transfers ownership of `/home/{username}/repo` after the clone, sets `HOME=/home/{username}`, and keeps setup privileged only until the workspace is ready. The runner reserves `/home/{username}` itself, `/home/{username}/.agentd` plus its descendants, and `/home/{username}/repo` plus its descendants so host-backed bind mounts cannot collide with runner-managed paths.
 8. When manual invocation includes operator input, reads the active methodology's `manifest.toml` plus `schemas/<type>.schema.json` on the host, validates the input there, stages the final JSON under a runner-managed bind mount at `/agentd/invocation-input`, and rejects unsupported request canonical versions before any container is created. The runner-created invocation-input mount source is staged with explicit host-side read/traverse modes so session-user access does not depend on the daemon process's umask. In `v0.1.x`, request-text input supports canonical request version `1.0.0` only, keyed by `x-tesserine-canonical.version`.
@@ -264,6 +264,9 @@ bind mount so the persisted `runa/` subtree remains writable on
 SELinux-enforcing hosts such as Fedora CoreOS. `agentd/session.json` is not
 mounted into the container; it stays host-only so runa-written state and
 agentd-written metadata are distinguishable on disk without disambiguation.
+Session containers use `--userns keep-id:uid=1000,gid=1000`, and agentd creates
+the in-container agent user at UID/GID `1000`, so the audit bind mount appears
+owned by the same unprivileged identity that invokes `runa init`.
 
 Final audit sealing is daemon-local. agentd uses direct filesystem operations
 to refuse unsafe multi-linked entries and chmod completed audit records; it
@@ -275,13 +278,18 @@ The deployment contract supplies that second half: files written by the session
 container's unprivileged agent user must be owned by an identity the daemon can
 chmod.
 
-The primary supported contract is UID alignment. With the default rootless
-Podman user namespace mapping, a session container UID `N > 0` is represented
-on the host as `subuid_start + (N - 1)`. The daemon container's effective host
-identity must match the mapped host UID for the session's unprivileged agent
-user, or deployment must grant equivalent host-level chmod authority such as
-`CAP_FOWNER` over the audit tree. That daemon identity must also retain access
-to the mounted Podman socket and the configured runtime paths.
+The primary supported contract is daemon identity alignment through Podman's
+`keep-id` user namespace mode. The in-container session user is UID/GID `1000`,
+and that ID maps to the daemon's host UID/GID. That keeps runa's state
+ownership preflight and agentd's daemon-local audit sealing authority aligned
+without session-side audit mount chown. Mount-level idmapped bind mounts would
+fit this ownership mismatch more narrowly, but the supported daemon image uses
+Debian Bookworm's Podman 4.3 client and current rootless bind mounts do not
+provide that surface. The `keep-id` contract is therefore an explicit
+single-tenant security tradeoff: compared with default rootless subuid mapping,
+a session-user escape has the daemon's host-file authority over daemon-owned
+paths. The daemon identity must also retain access to the mounted Podman socket
+and the configured runtime paths.
 
 Host audit records live under the resolved audit root, by default
 `$XDG_STATE_HOME/tesserine/audit/<agent>/<session_id>/` or
@@ -309,12 +317,12 @@ records requires restoring write permission first, for example
 
 The host security model is intentionally single-tenant. While a session is
 running, agentd opens the mounted `runa/` subtree with mode `0o777` so writes
-through the rootless container's UID mapping succeed. Any user with host shell
-access can therefore read or write that subtree during the active session. On
-completion, agentd seals directories to `0555` and non-symlink entries to
-`0444`, making finished records world-readable on the host. For single-tenant
-deployments such as babbie, that tradeoff is acceptable; a multi-tenant host
-would need a different permission model before deployment.
+through the session user's mapped daemon identity succeed. Any user with host
+shell access can therefore read or write that subtree during the active
+session. On completion, agentd seals directories to `0555` and non-symlink
+entries to `0444`, making finished records world-readable on the host. For
+single-tenant deployments such as babbie, that tradeoff is acceptable; a
+multi-tenant host would need a different permission model before deployment.
 
 The startup audit-root probe is intentionally local-filesystem scoped. It
 verifies that the daemon can create, chmod, restore, and remove daemon-owned

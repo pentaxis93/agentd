@@ -1971,6 +1971,8 @@ case "$command_name" in
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "write-repo-audit-state" ]; then
             [ -L "${HOME}/repo/.runa" ]
             [ "$(readlink "${HOME}/repo/.runa")" = "${HOME}/.agentd/audit/runa" ]
+            [ "$(stat -Lc '%u:%g' "${HOME}/repo/.runa")" = "$(id -u):$(id -g)" ]
+            [ -w "${HOME}/repo/.runa" ]
             mkdir -p "${HOME}/repo/.runa/workspace" "${HOME}/repo/.runa/store/executions"
             printf 'persisted through repo bridge\n' > "${HOME}/repo/.runa/workspace/session-artifact.txt"
             printf '{"protocols":["begin"],"postconditions":["passed"]}\n' > "${HOME}/repo/.runa/store/executions/0001.json"

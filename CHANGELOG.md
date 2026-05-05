@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace from inside the rootless session container, and runner-created
   invocation-input staging now uses explicit host-side read modes, preserving
   the mode-based audit writability contract for credential-bearing runs.
+- Session containers now map the daemon host identity to the in-container
+  session user with `--userns keep-id:uid=1000,gid=1000`, so runa observes the
+  audit-backed `.runa` state as owned by the user invoking `runa init`. This is
+  an explicit single-tenant security tradeoff: a session-user escape has the
+  daemon's host-file authority over daemon-owned paths.
 - Session secret cleanup now works on the supported Debian Bookworm Podman
   version floor by avoiding `podman secret rm --ignore` while preserving
   idempotent cleanup for already-removed secrets.

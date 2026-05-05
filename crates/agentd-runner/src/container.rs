@@ -28,6 +28,8 @@ use std::time::{Duration, Instant};
 
 const ATTACHED_STDERR_TAIL_LIMIT: usize = 64 * 1024;
 const ATTACHED_STDERR_TRUNCATION_NOTICE: &str = "[stderr truncated to last 65536 bytes]\n";
+const SESSION_USER_ID: u32 = 1000;
+const SESSION_GROUP_ID: u32 = 1000;
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const METHODOLOGY_MANIFEST_PATH: &str = "/agentd/methodology/manifest.toml";
 const PODMAN_INFRASTRUCTURE_ERROR_EXIT_CODE: i32 = 125;
@@ -170,9 +172,17 @@ fn build_container_script(
     let repo_dir = repo_dir_path.display().to_string();
     let repo_runa_dir = session_repo_runa_dir(username).display().to_string();
     let user_group = format!("{username}:{username}");
-    let mut script = String::from("set -eu\nuseradd --create-home --home-dir ");
+    let mut script = String::from("set -eu\ngroupadd --gid ");
+    script.push_str(&SESSION_GROUP_ID.to_string());
+    script.push(' ');
+    script.push_str(&shell_quote(username));
+    script.push_str("\nuseradd --create-home --home-dir ");
     script.push_str(&shell_quote(&home_dir));
-    script.push_str(" --shell /bin/sh --user-group ");
+    script.push_str(" --shell /bin/sh --uid ");
+    script.push_str(&SESSION_USER_ID.to_string());
+    script.push_str(" --gid ");
+    script.push_str(&shell_quote(username));
+    script.push(' ');
     script.push_str(&shell_quote(username));
     script.push('\n');
     script.push_str("mkdir -p ");
@@ -334,6 +344,8 @@ fn build_create_container_args(
         "create".to_string(),
         "--name".to_string(),
         resources.container_name.clone(),
+        "--userns".to_string(),
+        format!("keep-id:uid={SESSION_USER_ID},gid={SESSION_GROUP_ID}"),
         "--mount".to_string(),
         format!(
             "type=bind,src={},target={},ro=true,relabel=shared",
