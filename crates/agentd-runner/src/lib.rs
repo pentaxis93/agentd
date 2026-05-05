@@ -37,7 +37,10 @@ pub use validation::{
     validate_repo_url,
 };
 
-use audit::{SessionAuditCompletion, finalize_session_audit_record, prepare_session_audit_record};
+use audit::{
+    SessionAuditCompletion, finalize_session_audit_record, finalize_session_transcript,
+    prepare_session_audit_record,
+};
 use container::{create_container, run_container_to_completion, run_container_with_timeout};
 use input::resolve_invocation_input;
 use lifecycle::{
@@ -264,6 +267,7 @@ fn finalize_session_audit_record_if_cleanup_succeeded(
         return Ok(());
     }
 
+    finalize_session_transcript(record)?;
     finalize_session_audit_record(record, completion)
 }
 
@@ -288,6 +292,7 @@ mod tests {
     };
     use serde_json::Value;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -318,6 +323,24 @@ mod tests {
                 .expect("session metadata should be readable"),
         )
         .expect("session metadata should be valid json")
+    }
+
+    fn make_tree_writable(path: &Path) {
+        let metadata = fs::symlink_metadata(path).expect("path metadata should exist");
+        if metadata.file_type().is_symlink() {
+            return;
+        }
+
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).expect("directory should be readable") {
+                let entry = entry.expect("directory entry should be readable");
+                make_tree_writable(&entry.path());
+            }
+        }
+
+        let writable_mode = metadata.permissions().mode() | 0o700;
+        fs::set_permissions(path, fs::Permissions::from_mode(writable_mode))
+            .expect("path should become writable for cleanup");
     }
 
     const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
@@ -407,6 +430,7 @@ mod tests {
         );
         assert_eq!(metadata["outcome"], "success");
 
+        make_tree_writable(&audit_root);
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
@@ -552,6 +576,7 @@ mod tests {
             "allocation rollback failure must leave the top-level runa dir in its active writable mode"
         );
 
+        make_tree_writable(&audit_root);
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
@@ -637,6 +662,7 @@ mod tests {
             "cleanup failure must not seal the top-level runa dir"
         );
 
+        make_tree_writable(&audit_root);
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
@@ -729,6 +755,7 @@ mod tests {
             "cleanup failure must not seal the top-level runa dir"
         );
 
+        make_tree_writable(&audit_root);
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
@@ -831,6 +858,7 @@ mod tests {
 
         fs::set_permissions(record_dir.join("agentd"), fs::Permissions::from_mode(0o755))
             .expect("agentd dir should become removable for test cleanup");
+        make_tree_writable(&audit_root);
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 
@@ -947,6 +975,7 @@ mod tests {
             .expect("direct dir should become removable for test cleanup");
         fs::set_permissions(record_dir.join("runa"), fs::Permissions::from_mode(0o755))
             .expect("runa dir should become removable for test cleanup");
+        make_tree_writable(&audit_root);
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
     }
 

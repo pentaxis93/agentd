@@ -19,6 +19,7 @@ fn test_audit_record() -> SessionAuditRecord {
     SessionAuditRecord {
         record_dir: PathBuf::from("/tmp/audit/site-builder/0123456789abcdef"),
         runa_dir: PathBuf::from("/tmp/audit/site-builder/0123456789abcdef/runa"),
+        transcript_dir: PathBuf::from("/tmp/audit/site-builder/0123456789abcdef/agentd/transcript"),
         metadata_path: PathBuf::from(
             "/tmp/audit/site-builder/0123456789abcdef/agentd/session.json",
         ),
@@ -41,6 +42,12 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
             audit_mount: PreparedBindMount {
                 source: PathBuf::from("/tmp/staging/audit-runa"),
                 target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
+            transcript_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/transcript"),
+                target: PathBuf::from("/agentd/transcript"),
                 read_only: false,
                 relabel_shared: true,
             },
@@ -83,6 +90,12 @@ fn create_container_args_use_volume_for_shared_relabel_sources_containing_commas
                 read_only: false,
                 relabel_shared: true,
             },
+            transcript_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/transcript,with,commas"),
+                target: PathBuf::from("/agentd/transcript"),
+                read_only: false,
+                relabel_shared: true,
+            },
             invocation_input_mount: None,
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
@@ -105,6 +118,7 @@ fn create_container_args_use_volume_for_shared_relabel_sources_containing_commas
         vec![
             "/tmp/source,with,commas/methodology:/agentd/methodology:ro,z".to_string(),
             "/tmp/audit,with,commas/runa:/home/site-builder/.agentd/audit/runa:rw,z".to_string(),
+            "/tmp/transcript,with,commas:/agentd/transcript:rw,z".to_string(),
         ]
     );
     assert!(
@@ -124,6 +138,12 @@ fn create_container_args_force_root_user_and_entrypoint_before_image_argument() 
             audit_mount: PreparedBindMount {
                 source: PathBuf::from("/tmp/staging/audit-runa"),
                 target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
+            transcript_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/transcript"),
+                target: PathBuf::from("/agentd/transcript"),
                 read_only: false,
                 relabel_shared: true,
             },
@@ -175,6 +195,12 @@ fn create_container_args_map_daemon_identity_to_session_user_id() {
             audit_mount: PreparedBindMount {
                 source: PathBuf::from("/tmp/staging/audit-runa"),
                 target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
+            transcript_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/transcript"),
+                target: PathBuf::from("/agentd/transcript"),
                 read_only: false,
                 relabel_shared: true,
             },
@@ -232,6 +258,12 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
                 read_only: false,
                 relabel_shared: true,
             },
+            transcript_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/transcript"),
+                target: PathBuf::from("/agentd/transcript"),
+                read_only: false,
+                relabel_shared: true,
+            },
             invocation_input_mount: None,
             additional_mounts: Vec::new(),
             environment_secret_bindings: Vec::new(),
@@ -268,6 +300,12 @@ fn create_container_args_include_configured_additional_mounts_after_methodology_
                 read_only: false,
                 relabel_shared: true,
             },
+            transcript_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/staging/transcript"),
+                target: PathBuf::from("/agentd/transcript"),
+                read_only: false,
+                relabel_shared: true,
+            },
             invocation_input_mount: None,
             additional_mounts: vec![
                 PreparedBindMount {
@@ -298,27 +336,31 @@ fn create_container_args_include_configured_additional_mounts_after_methodology_
     );
 
     let mount_values = argument_values(&args, "--mount");
-    assert_eq!(mount_values.len(), 4);
+    assert_eq!(mount_values.len(), 5);
     assert!(mount_values[0].contains("src=/tmp/staging/methodology"));
     assert!(mount_values[1].contains("src=/tmp/staging/audit-runa"));
     assert!(mount_values[1].contains("target=/home/site-builder/.agentd/audit/runa"));
     assert!(mount_values[1].contains("ro=false"));
     assert!(mount_values[1].contains("relabel=shared"));
-    assert!(mount_values[2].contains("src=/tmp/staging/mount-0"));
-    assert!(mount_values[2].contains("target=/home/site-builder/.claude"));
-    assert!(mount_values[2].contains("ro=true"));
-    assert!(
-        !mount_values[2].contains("relabel="),
-        "operator-declared mounts should not mutate host SELinux labels: {}",
-        mount_values[2]
-    );
-    assert!(mount_values[3].contains("src=/tmp/staging/mount-1"));
-    assert!(mount_values[3].contains("target=/home/site-builder/.runa"));
-    assert!(mount_values[3].contains("ro=false"));
+    assert!(mount_values[2].contains("src=/tmp/staging/transcript"));
+    assert!(mount_values[2].contains("target=/agentd/transcript"));
+    assert!(mount_values[2].contains("ro=false"));
+    assert!(mount_values[2].contains("relabel=shared"));
+    assert!(mount_values[3].contains("src=/tmp/staging/mount-0"));
+    assert!(mount_values[3].contains("target=/home/site-builder/.claude"));
+    assert!(mount_values[3].contains("ro=true"));
     assert!(
         !mount_values[3].contains("relabel="),
         "operator-declared mounts should not mutate host SELinux labels: {}",
         mount_values[3]
+    );
+    assert!(mount_values[4].contains("src=/tmp/staging/mount-1"));
+    assert!(mount_values[4].contains("target=/home/site-builder/.runa"));
+    assert!(mount_values[4].contains("ro=false"));
+    assert!(
+        !mount_values[4].contains("relabel="),
+        "operator-declared mounts should not mutate host SELinux labels: {}",
+        mount_values[4]
     );
 }
 
@@ -435,6 +477,8 @@ fn build_container_script_uses_mode_based_audit_mount_writability_without_chown(
             "\nln -s '/home/myagent/.agentd/audit/runa' '/home/myagent/repo/.runa'\n\
              export HOME='/home/myagent'\n\
              unset AGENTD_WORK_UNIT\n\
+             export RUNA_TRANSCRIPT_DIR='/agentd/transcript'\n\
+             export RUNA_TRANSCRIPT_REDACT_ENV=''\n\
              gosu 'myagent:myagent' runa init"
         ),
         "audit mount root should rely on host-side mode setup before runa init: {script}"

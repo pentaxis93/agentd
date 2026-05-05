@@ -899,6 +899,222 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
 }
 
 #[test]
+fn persists_session_transcript_under_agentd_audit_dir() {
+    if skip_if_podman_unavailable("persists_session_transcript_under_agentd_audit_dir") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("audit-transcript-run");
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            agent_name: "audit-transcript-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "success-without-work-unit".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+    let transcript_dir = fixture.only_session_record_dir().join("agentd/transcript");
+    let events = fs::read_to_string(transcript_dir.join("events.jsonl"))
+        .expect("structured transcript events should persist");
+    assert!(events.contains("\"kind\":\"agent_input\""), "{events}");
+    assert!(events.contains("\"kind\":\"agent_exit\""), "{events}");
+
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(transcript_dir.join("manifest.json"))
+            .expect("transcript manifest should persist"),
+    )
+    .expect("transcript manifest should be json");
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["coverage"], "missing_mcp_events");
+
+    let markdown = fs::read_to_string(transcript_dir.join("transcript.md"))
+        .expect("human-readable transcript should persist");
+    assert!(markdown.contains("# Session Transcript"), "{markdown}");
+    assert!(markdown.contains("agent_input"), "{markdown}");
+
+    let events_mode = fs::metadata(transcript_dir.join("events.jsonl"))
+        .expect("events permissions should exist")
+        .permissions()
+        .mode();
+    assert_eq!(events_mode & 0o222, 0, "transcript should be sealed");
+
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn finalizes_session_after_runtime_restricts_transcript_directory_permissions() {
+    if skip_if_podman_unavailable(
+        "finalizes_session_after_runtime_restricts_transcript_directory_permissions",
+    ) {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("audit-transcript-dir-mode");
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            agent_name: "audit-transcript-dir-mode".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "restrict-transcript-dir".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+    let record_dir = fixture.only_session_record_dir();
+    let transcript_dir = record_dir.join("agentd/transcript");
+    let manifest_result = fs::read_to_string(transcript_dir.join("manifest.json"));
+    if manifest_result.is_err() {
+        let _ = fs::set_permissions(&transcript_dir, fs::Permissions::from_mode(0o755));
+    }
+    let manifest: Value =
+        serde_json::from_str(&manifest_result.expect("transcript manifest should persist"))
+            .expect("transcript manifest should be json");
+    assert_eq!(manifest["coverage"], "missing_mcp_events");
+
+    let markdown = fs::read_to_string(transcript_dir.join("transcript.md"))
+        .expect("human-readable transcript should persist");
+    assert!(markdown.contains("agent_input"), "{markdown}");
+
+    let session: Value = serde_json::from_str(
+        &fs::read_to_string(record_dir.join("agentd/session.json"))
+            .expect("session metadata should persist"),
+    )
+    .expect("session metadata should be json");
+    assert_eq!(session["outcome"], "success");
+
+    let transcript_mode = fs::metadata(&transcript_dir)
+        .expect("transcript dir metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(transcript_mode, 0o555);
+
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn finalizes_session_after_runtime_restricts_events_jsonl_permissions() {
+    if skip_if_podman_unavailable(
+        "finalizes_session_after_runtime_restricts_events_jsonl_permissions",
+    ) {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("audit-transcript-events-mode");
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            agent_name: "audit-transcript-events-mode".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "restrict-transcript-events".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+    let record_dir = fixture.only_session_record_dir();
+    let transcript_dir = record_dir.join("agentd/transcript");
+    let events_path = transcript_dir.join("events.jsonl");
+    let manifest_result = fs::read_to_string(transcript_dir.join("manifest.json"));
+    if manifest_result.is_err() {
+        let _ = fs::set_permissions(&events_path, fs::Permissions::from_mode(0o644));
+    }
+    let manifest: Value =
+        serde_json::from_str(&manifest_result.expect("transcript manifest should persist"))
+            .expect("transcript manifest should be json");
+    assert_eq!(manifest["coverage"], "missing_mcp_events");
+
+    let events = fs::read_to_string(&events_path).expect("structured transcript should persist");
+    assert!(events.contains("\"kind\":\"agent_input\""), "{events}");
+
+    let session: Value = serde_json::from_str(
+        &fs::read_to_string(record_dir.join("agentd/session.json"))
+            .expect("session metadata should persist"),
+    )
+    .expect("session metadata should be json");
+    assert_eq!(session["outcome"], "success");
+
+    let events_mode = fs::metadata(&events_path)
+        .expect("events metadata should exist")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(events_mode, 0o444);
+
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
 fn preserves_host_readability_for_restrictive_container_written_audit_entries_after_teardown() {
     if skip_if_podman_unavailable(
         "preserves_host_readability_for_restrictive_container_written_audit_entries_after_teardown",
@@ -1713,9 +1929,9 @@ const RUNA_STUB: &str = r#"#!/bin/sh
 set -eu
 
 subcommand="${1:-}"
-if [ "$#" -gt 0 ]; then
-    shift
-fi
+        if [ "$#" -gt 0 ]; then
+            shift
+        fi
 
 case "$subcommand" in
     init)
@@ -1768,6 +1984,11 @@ EOF
                         printf 'run --work-unit %s --agent-command -- %s\n' "$work_unit" "$*" >> .runa/calls.log
                     else
                         printf 'run --agent-command -- %s\n' "$*" >> .runa/calls.log
+                    fi
+                    if [ -n "${RUNA_TRANSCRIPT_DIR:-}" ]; then
+                        mkdir -p "${RUNA_TRANSCRIPT_DIR}"
+                        printf '{"schema_version":1,"source":"runa","kind":"agent_input","content":"stub prompt"}\n' >> "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
+                        printf '{"schema_version":1,"source":"runa","kind":"agent_exit","success":true}\n' >> "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
                     fi
                     exec "$@"
                     ;;
@@ -1942,6 +2163,16 @@ case "$command_name" in
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "success-without-work-unit" ]; then
             [ "${AGENTD_WORK_UNIT+set}" != "set" ]
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "restrict-transcript-dir" ]; then
+            chmod 000 "${RUNA_TRANSCRIPT_DIR}"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "restrict-transcript-events" ]; then
+            chmod 000 "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
             exit 0
         fi
 

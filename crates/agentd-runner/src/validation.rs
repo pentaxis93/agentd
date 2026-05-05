@@ -19,10 +19,13 @@ use std::path::Path;
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
 pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
+pub(crate) const TRANSCRIPT_DIR_ENV: &str = "RUNA_TRANSCRIPT_DIR";
+pub(crate) const TRANSCRIPT_REDACT_ENV: &str = "RUNA_TRANSCRIPT_REDACT_ENV";
 const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
 const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
 const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
+const TRANSCRIPT_MOUNT_PATH: &str = "/agentd/transcript";
 
 pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if !is_daemon_instance_id(&spec.daemon_instance_id) {
@@ -161,8 +164,9 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 /// Validates an environment variable name against naming rules.
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
-/// runner-managed names (currently `AGENT_NAME`, `AGENTD_WORK_UNIT`, and
-/// `AGENTD_REPO_TOKEN`). Used both by
+/// runner-managed names such as `AGENT_NAME`, `AGENTD_WORK_UNIT`,
+/// `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`, and
+/// `RUNA_TRANSCRIPT_REDACT_ENV`. Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
 /// configuration layer for credential name validation.
 pub fn validate_environment_name(name: &str) -> Result<(), EnvironmentNameValidationError> {
@@ -281,7 +285,14 @@ fn repo_token_requires_https_error() -> RunnerError {
 }
 
 fn is_reserved_environment_name(name: &str) -> bool {
-    matches!(name, AGENT_NAME_ENV | WORK_UNIT_ENV | REPO_TOKEN_ENV)
+    matches!(
+        name,
+        AGENT_NAME_ENV
+            | WORK_UNIT_ENV
+            | REPO_TOKEN_ENV
+            | TRANSCRIPT_DIR_ENV
+            | TRANSCRIPT_REDACT_ENV
+    )
 }
 
 fn is_reserved_agent_name(name: &str) -> bool {
@@ -294,6 +305,7 @@ fn is_reserved_mount_target(target: &Path, agent_name: &str) -> bool {
     let repo_dir = session_repo_dir(agent_name);
     let methodology_dir = Path::new(METHODOLOGY_MOUNT_PATH);
     let invocation_input_dir = Path::new(INVOCATION_INPUT_MOUNT_PATH);
+    let transcript_dir = Path::new(TRANSCRIPT_MOUNT_PATH);
 
     // Each rule states the invariant for one runner-owned path. Intentional
     // overlap is part of the contract: targets like `/home` or `/` can
@@ -307,6 +319,10 @@ fn is_reserved_mount_target(target: &Path, agent_name: &str) -> bool {
     }
 
     if target.starts_with(invocation_input_dir) || invocation_input_dir.starts_with(target) {
+        return true;
+    }
+
+    if target.starts_with(transcript_dir) || transcript_dir.starts_with(target) {
         return true;
     }
 
@@ -383,7 +399,13 @@ mod tests {
 
     #[test]
     fn validate_spec_rejects_reserved_environment_names() {
-        for reserved_name in ["AGENT_NAME", WORK_UNIT_ENV, REPO_TOKEN_ENV] {
+        for reserved_name in [
+            "AGENT_NAME",
+            WORK_UNIT_ENV,
+            REPO_TOKEN_ENV,
+            "RUNA_TRANSCRIPT_DIR",
+            "RUNA_TRANSCRIPT_REDACT_ENV",
+        ] {
             let error = validate_spec(&SessionSpec {
                 environment: vec![ResolvedEnvironmentVariable {
                     name: reserved_name.to_string(),
@@ -393,11 +415,23 @@ mod tests {
             })
             .expect_err("reserved runner environment names should be rejected");
 
-            match error {
+            match &error {
                 RunnerError::ReservedEnvironmentName { name } => {
                     assert_eq!(name, reserved_name);
                 }
                 other => panic!("expected ReservedEnvironmentName, got {other:?}"),
+            }
+
+            let message = error.to_string();
+            assert!(
+                message.contains(reserved_name),
+                "reserved environment error should name {reserved_name}: {message}"
+            );
+            if reserved_name.starts_with("RUNA_TRANSCRIPT_") {
+                assert!(
+                    message.contains("transcript subsystem") && message.contains("set internally"),
+                    "transcript reserved environment error should explain ownership: {message}"
+                );
             }
         }
     }
@@ -610,6 +644,26 @@ mod tests {
         match error {
             RunnerError::ReservedMountTarget { target } => {
                 assert_eq!(target, PathBuf::from("/agentd/invocation-input"));
+            }
+            other => panic!("expected ReservedMountTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_mount_targets_that_collide_with_transcript_mount() {
+        let error = validate_spec(&SessionSpec {
+            mounts: vec![BindMount {
+                source: PathBuf::from("/home/core/.claude"),
+                target: PathBuf::from("/agentd/transcript"),
+                read_only: true,
+            }],
+            ..test_session_spec()
+        })
+        .expect_err("mount targets must not collide with the transcript mount");
+
+        match error {
+            RunnerError::ReservedMountTarget { target } => {
+                assert_eq!(target, PathBuf::from("/agentd/transcript"));
             }
             other => panic!("expected ReservedMountTarget, got {other:?}"),
         }
