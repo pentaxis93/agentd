@@ -19,12 +19,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-const METHODOLOGY_STAGE_LINK_NAME: &str = "methodology";
 const INVOCATION_INPUT_STAGE_DIR_NAME: &str = "invocation-input";
 const INVOCATION_INPUT_FILE_NAME: &str = "document.json";
 const INVOCATION_INPUT_STAGE_DIR_MODE: u32 = 0o755;
 const INVOCATION_INPUT_FILE_MODE: u32 = 0o644;
-const AUDIT_RUNA_STAGE_LINK_NAME: &str = "audit-runa";
 const ADDITIONAL_MOUNT_STAGE_PREFIX: &str = "mount-";
 const SESSION_STAGE_PREFIX: &str = "agentd-session-stage-";
 
@@ -111,9 +109,9 @@ pub(crate) fn prepare_session_resources(
         ));
     }
 
-    let methodology_staging_dir = create_methodology_staging_dir(&spec.methodology_dir, session_id)
+    let methodology_staging_dir = create_session_staging_dir(session_id)
         .map_err(ResourceAllocationFailure::without_rollback_failure)?;
-    let audit_mount = match create_audit_mount(&audit_record, spec, &methodology_staging_dir) {
+    let audit_mount = match create_audit_mount(&audit_record, spec) {
         Ok(mount) => mount,
         Err(error) => {
             return Err(rollback_failed_staging_dir_allocation(
@@ -124,7 +122,21 @@ pub(crate) fn prepare_session_resources(
             ));
         }
     };
-    let methodology_mount_source = methodology_staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
+    let methodology_mount_source =
+        match canonical_mount_source(&spec.methodology_dir).and_then(|path| {
+            validate_shared_relabel_mount_source(&path)?;
+            Ok(path)
+        }) {
+            Ok(path) => path,
+            Err(error) => {
+                return Err(rollback_failed_staging_dir_allocation(
+                    container_name,
+                    session_id,
+                    &methodology_staging_dir,
+                    error,
+                ));
+            }
+        };
     let invocation_input_mount =
         match create_invocation_input_mount(resolved_input, &methodology_staging_dir) {
             Ok(mount) => mount,
@@ -300,23 +312,9 @@ pub(crate) fn cleanup_methodology_staging_dir(path: &Path) -> Result<(), RunnerE
     }
 }
 
-// Creates a staging directory containing a symlink to the canonical methodology
-// path. The symlink indirection ensures the podman bind-mount source is always
-// an absolute, canonical path free of characters that break mount syntax, even
-// when the original methodology_dir is relative or contains problematic chars.
-fn create_methodology_staging_dir(
-    methodology_dir: &Path,
-    session_id: &str,
-) -> Result<PathBuf, RunnerError> {
-    let canonical_methodology_dir = methodology_dir.canonicalize()?;
+fn create_session_staging_dir(session_id: &str) -> Result<PathBuf, RunnerError> {
     let staging_dir = safe_staging_root().join(format!("{SESSION_STAGE_PREFIX}{session_id}"));
     fs::create_dir_all(&staging_dir)?;
-    let staged_link = staging_dir.join(METHODOLOGY_STAGE_LINK_NAME);
-
-    if let Err(error) = create_path_symlink(&canonical_methodology_dir, &staged_link) {
-        let _ = fs::remove_dir_all(&staging_dir);
-        return Err(error);
-    }
 
     Ok(staging_dir)
 }
@@ -343,11 +341,9 @@ fn create_additional_mounts(
 fn create_audit_mount(
     audit_record: &SessionAuditRecord,
     spec: &SessionSpec,
-    staging_dir: &Path,
 ) -> Result<PreparedBindMount, RunnerError> {
-    create_prepared_bind_mount(
+    create_direct_prepared_bind_mount(
         &audit_record.runa_dir,
-        staging_dir.join(AUDIT_RUNA_STAGE_LINK_NAME),
         session_internal_audit_runa_dir(&spec.agent_name),
         false,
         true,
@@ -375,8 +371,11 @@ fn create_invocation_input_mount(
         fs::Permissions::from_mode(INVOCATION_INPUT_FILE_MODE),
     )?;
 
+    let canonical_staged_dir = canonical_mount_source(&staged_dir)?;
+    validate_shared_relabel_mount_source(&canonical_staged_dir)?;
+
     Ok(Some(PreparedBindMount {
-        source: staged_dir,
+        source: canonical_staged_dir,
         target: PathBuf::from(INVOCATION_INPUT_MOUNT_PATH),
         read_only: true,
         relabel_shared: true,
@@ -390,18 +389,51 @@ fn create_prepared_bind_mount(
     read_only: bool,
     relabel_shared: bool,
 ) -> Result<PreparedBindMount, RunnerError> {
-    let canonical_source = source.canonicalize().map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => RunnerError::MissingMountSource {
-            path: source.to_path_buf(),
-        },
-        _ => RunnerError::Io(error),
-    })?;
+    let canonical_source = canonical_mount_source(source)?;
     create_path_symlink(&canonical_source, &staged_source)?;
     Ok(PreparedBindMount {
         source: staged_source,
         target,
         read_only,
         relabel_shared,
+    })
+}
+
+fn create_direct_prepared_bind_mount(
+    source: &Path,
+    target: PathBuf,
+    read_only: bool,
+    relabel_shared: bool,
+) -> Result<PreparedBindMount, RunnerError> {
+    let canonical_source = canonical_mount_source(source)?;
+    if relabel_shared {
+        validate_shared_relabel_mount_source(&canonical_source)?;
+    }
+    Ok(PreparedBindMount {
+        source: canonical_source,
+        target,
+        read_only,
+        relabel_shared,
+    })
+}
+
+fn validate_shared_relabel_mount_source(source: &Path) -> Result<(), RunnerError> {
+    let source = source.to_string_lossy();
+    if source.contains(',') && source.contains(':') {
+        return Err(RunnerError::UnencodableRelabelMountSource {
+            path: PathBuf::from(source.as_ref()),
+        });
+    }
+
+    Ok(())
+}
+
+fn canonical_mount_source(source: &Path) -> Result<PathBuf, RunnerError> {
+    source.canonicalize().map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => RunnerError::MissingMountSource {
+            path: source.to_path_buf(),
+        },
+        _ => RunnerError::Io(error),
     })
 }
 
@@ -467,8 +499,9 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        INVOCATION_INPUT_FILE_NAME, INVOCATION_INPUT_STAGE_DIR_NAME, create_invocation_input_mount,
-        prepare_session_resources, rollback_failed_staging_dir_allocation, unique_suffix_with,
+        INVOCATION_INPUT_FILE_NAME, INVOCATION_INPUT_STAGE_DIR_NAME,
+        cleanup_methodology_staging_dir, create_invocation_input_mount, prepare_session_resources,
+        rollback_failed_staging_dir_allocation, unique_suffix_with,
     };
     use crate::audit::SessionAuditRecord;
     use crate::input::{INVOCATION_INPUT_MOUNT_PATH, ResolvedInvocationInput};
@@ -617,6 +650,134 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
             .expect("rollback parent should become writable for cleanup");
         fs::remove_dir_all(&root).expect("temporary rollback root should be removed");
+    }
+
+    #[test]
+    fn prepare_session_resources_uses_canonical_audit_dir_as_shared_relabel_source() {
+        let root = unique_test_dir("agentd-audit-direct-relabel-source");
+        let methodology_dir = root.join("methodology");
+        fs::create_dir_all(&methodology_dir).expect("methodology dir should be created");
+        fs::write(methodology_dir.join("manifest.toml"), "name = \"test\"\n")
+            .expect("methodology manifest should be written");
+        let session_id = format!("session-audit-direct-source-{}", std::process::id());
+        let audit_record = test_audit_record(&session_id);
+        let canonical_runa_dir = audit_record
+            .runa_dir
+            .canonicalize()
+            .expect("test audit runa dir should canonicalize");
+
+        let resources = prepare_session_resources(
+            "agentd-agent-session",
+            &crate::SessionSpec {
+                methodology_dir,
+                ..test_session_spec()
+            },
+            &SessionInvocation {
+                repo_url: "https://example.com/repo.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+            &session_id,
+            audit_record,
+            None,
+        )
+        .expect("session resources should allocate");
+
+        assert_eq!(resources.audit_mount.source, canonical_runa_dir);
+        assert!(resources.audit_mount.relabel_shared);
+
+        cleanup_methodology_staging_dir(&resources.methodology_staging_dir)
+            .expect("staging dir should clean up");
+        fs::remove_dir_all(&resources.audit_record.record_dir)
+            .expect("temporary audit record should be removed");
+        fs::remove_dir_all(&root).expect("temporary root should be removed");
+    }
+
+    #[test]
+    fn prepare_session_resources_uses_canonical_methodology_dir_as_shared_relabel_source() {
+        let root = unique_test_dir("agentd-methodology-direct-relabel-source");
+        let methodology_dir = root.join("methodology");
+        fs::create_dir_all(&methodology_dir).expect("methodology dir should be created");
+        fs::write(methodology_dir.join("manifest.toml"), "name = \"test\"\n")
+            .expect("methodology manifest should be written");
+        let canonical_methodology_dir = methodology_dir
+            .canonicalize()
+            .expect("test methodology dir should canonicalize");
+        let session_id = format!("session-methodology-direct-source-{}", std::process::id());
+
+        let resources = prepare_session_resources(
+            "agentd-agent-session",
+            &crate::SessionSpec {
+                methodology_dir,
+                ..test_session_spec()
+            },
+            &SessionInvocation {
+                repo_url: "https://example.com/repo.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+            &session_id,
+            test_audit_record(&session_id),
+            None,
+        )
+        .expect("session resources should allocate");
+
+        assert_eq!(
+            resources.methodology_mount_source,
+            canonical_methodology_dir
+        );
+
+        cleanup_methodology_staging_dir(&resources.methodology_staging_dir)
+            .expect("staging dir should clean up");
+        fs::remove_dir_all(&resources.audit_record.record_dir)
+            .expect("temporary audit record should be removed");
+        fs::remove_dir_all(&root).expect("temporary root should be removed");
+    }
+
+    #[test]
+    fn prepare_session_resources_rejects_shared_relabel_sources_that_cannot_be_encoded() {
+        let root = unique_test_dir("agentd-relabel-source,with:colon");
+        let methodology_dir = root.join("methodology");
+        fs::create_dir_all(&methodology_dir).expect("methodology dir should be created");
+        fs::write(methodology_dir.join("manifest.toml"), "name = \"test\"\n")
+            .expect("methodology manifest should be written");
+        let session_id = format!("session-relabel-source-syntax-{}", std::process::id());
+        let audit_record = test_audit_record(&session_id);
+        let audit_record_dir = audit_record.record_dir.clone();
+
+        let error = prepare_session_resources(
+            "agentd-agent-session",
+            &crate::SessionSpec {
+                methodology_dir: methodology_dir.clone(),
+                ..test_session_spec()
+            },
+            &SessionInvocation {
+                repo_url: "https://example.com/repo.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+            &session_id,
+            audit_record,
+            None,
+        )
+        .expect_err("unencodable shared relabel sources should fail allocation")
+        .allocation_error;
+
+        assert!(
+            error
+                .to_string()
+                .contains("shared relabel bind mount source cannot contain both ',' and ':'"),
+            "expected explicit relabel source syntax error, got {error}"
+        );
+
+        fs::remove_dir_all(audit_record_dir).expect("temporary audit record should be removed");
+        fs::remove_dir_all(&root).expect("temporary root should be removed");
     }
 
     #[test]

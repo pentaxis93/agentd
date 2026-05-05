@@ -47,16 +47,22 @@ service:
 | Daemon socket and PID file | daemon process; host clients use the socket through the host mount | Configure explicit daemon runtime paths inside the container and mount their parent directory from the host runtime location. |
 | Host Podman socket | daemon process through the Podman client | Mount the host rootless Podman socket to the path named by `CONTAINER_HOST`. |
 | Credential sources | daemon process environment | Inject the environment variables named by agent credentials into the daemon container. |
-| `methodology_dir` and request/artifact schemas | daemon process reads; host Podman resolves staged bind sources | The path must exist for the daemon and be valid from the host Podman service's filesystem view. |
-| `audit_root` | daemon process creates/chmods; host Podman resolves staged bind sources; session containers write audit entries | Mount durable host storage at the configured audit root, with the daemon UID aligned to the session writer's mapped host UID or granted equivalent chmod authority. |
+| `methodology_dir` and request/artifact schemas | daemon process reads; host Podman resolves direct relabelled methodology source | The path must exist for the daemon and be valid from the host Podman service's filesystem view. |
+| `audit_root` | daemon process creates/chmods; host Podman resolves direct relabelled audit sources; session containers write audit entries | Mount durable host storage at the configured audit root, with the daemon UID aligned to the session writer's mapped host UID or granted equivalent chmod authority. |
 | Agent-declared `mounts.source` | daemon process canonicalizes; host Podman resolves staged bind sources | Mount or expose each source so the daemon and host Podman agree on the source path. |
 | Runner staging directory | daemon process writes; host Podman resolves staged bind sources | The path named by `TMPDIR` must exist at the same absolute path for the daemon container and host Podman. The image default requires host `/var/lib/agentd/tmp` mounted to container `/var/lib/agentd/tmp`, or a changed `TMPDIR` exposed identically on both sides. |
 
 The path split follows directly from the current runner implementation. The
 daemon process validates and canonicalizes methodology, audit, additional
 mount, invocation-input, and staging paths, then sends bind-mount source
-strings to the host Podman service. Podman resolves those source strings on the
-host that owns the socket, not inside the daemon container. Any future
+strings to the host Podman service. Runner-owned relabelled sources are passed
+as direct canonical host paths so Podman's SELinux relabel operation applies to
+the real source tree; operator-declared mounts continue to use staged aliases.
+Runner-owned relabelled sources containing both `,` and `:` are rejected
+because neither Podman's comma-delimited `--mount` form nor its colon-delimited
+`--volume` fallback can encode that path unambiguously.
+Podman resolves those source strings on the host that owns the socket, not
+inside the daemon container. Any future
 host/container path translation would be a code change, not a deployment
 property.
 
@@ -246,12 +252,12 @@ Additional bind mounts are declared in agent configuration as `source`,
 `target`, and `read_only`. agentd validates absolute container targets plus a
 per-agent disjointness invariant: target paths must be unique and no target
 may be a path-component prefix of another. It then stages canonical host
-sources through runner-managed symlinks before calling Podman so host paths
-containing commas remain mountable. Subscription auth is the first read-only
-consumer of this mechanism; persistent audit storage in `#76` builds on the
-same path with read-write mounts. Additional mounts are not relabelled; on
-SELinux-enabled hosts, operators must pre-label those host paths with a
-container-compatible context.
+sources through runner-managed symlinks before calling Podman so additional
+mounts stay separate from runner-owned relabel handling. Subscription auth is
+the first read-only consumer of this mechanism; persistent audit storage in
+`#76` builds on the same path with read-write mounts. Additional mounts are not
+relabelled; on SELinux-enabled hosts, operators must pre-label those host paths
+with a container-compatible context.
 
 The invocation-input mount is runner-owned, not operator-owned. Its target
 `/agentd/invocation-input` is reserved alongside `/agentd/methodology`, so
@@ -259,9 +265,9 @@ agent-declared mounts cannot collide with the pre-command input-materialization
 path.
 
 The internal audit mount is different from operator-declared mounts. It is
-runner-owned, not operator-owned, and agentd applies `relabel=shared` to that
-bind mount so the persisted `runa/` subtree remains writable on
-SELinux-enforcing hosts such as Fedora CoreOS. `agentd/session.json` is not
+runner-owned, not operator-owned, and agentd applies shared SELinux relabeling
+to the canonical host `runa/` source so the persisted `runa/` subtree remains
+writable on SELinux-enforcing hosts such as Fedora CoreOS. `agentd/session.json` is not
 mounted into the container; it stays host-only so runa-written state and
 agentd-written metadata are distinguishable on disk without disambiguation.
 Session containers use `--userns keep-id:uid=1000,gid=1000`, and agentd creates

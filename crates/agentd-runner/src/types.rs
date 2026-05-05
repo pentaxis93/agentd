@@ -362,6 +362,9 @@ pub enum RunnerError {
     Io(std::io::Error),
     /// A configured bind mount source path does not exist.
     MissingMountSource { path: PathBuf },
+    /// A runner-owned shared-relabel bind mount source cannot be encoded safely
+    /// for Podman.
+    UnencodableRelabelMountSource { path: PathBuf },
     /// A podman CLI invocation returned a non-zero exit status. Captures the
     /// argument list, exit status, and stderr for diagnostics.
     PodmanCommandFailed {
@@ -429,6 +432,11 @@ impl fmt::Display for RunnerError {
             RunnerError::MissingMountSource { path } => {
                 write!(f, "mount source path does not exist: {}", path.display())
             }
+            RunnerError::UnencodableRelabelMountSource { path } => write!(
+                f,
+                "shared relabel bind mount source cannot contain both ',' and ':': {}",
+                path.display()
+            ),
             RunnerError::PodmanCommandFailed {
                 args,
                 status,

@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Runner-owned SELinux relabelled mounts now pass canonical host source paths
+  to Podman, so FCOS Enforcing deployments relabel the real audit `runa/`
+  subtree instead of a staging alias before `runa init`.
 - Session setup now prepares the internal audit mount without recursively
   traversing the bind-mounted `runa/` directory, allowing containerized daemon
   deployments to reach `runa init` when the audit mount is not readable during

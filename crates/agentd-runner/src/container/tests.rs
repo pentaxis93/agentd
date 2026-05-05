@@ -6,7 +6,7 @@ use crate::test_support::{
     CommandBehavior, CommandOutcome, FakePodmanFixture, FakePodmanScenario, InspectBehavior,
     capture_tracing_events, exit_status, fake_podman_lock, test_session_spec,
 };
-use crate::{ResolvedEnvironmentVariable, SessionInvocation};
+use crate::{BindMount, ResolvedEnvironmentVariable, SessionInvocation};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,50 @@ fn create_container_args_include_shared_relabel_for_methodology_mount() {
     assert!(
         mount_value.contains("relabel=shared"),
         "methodology bind mount should include shared SELinux relabeling: {mount_value}"
+    );
+}
+
+#[test]
+fn create_container_args_use_volume_for_shared_relabel_sources_containing_commas() {
+    let args = build_create_container_args(
+        &SessionResources {
+            container_name: "agentd-agent-session".to_string(),
+            methodology_staging_dir: PathBuf::from("/tmp/staging"),
+            methodology_mount_source: PathBuf::from("/tmp/source,with,commas/methodology"),
+            audit_record: test_audit_record(),
+            audit_mount: PreparedBindMount {
+                source: PathBuf::from("/tmp/audit,with,commas/runa"),
+                target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+                read_only: false,
+                relabel_shared: true,
+            },
+            invocation_input_mount: None,
+            additional_mounts: Vec::new(),
+            environment_secret_bindings: Vec::new(),
+            repo_token_secret_binding: None,
+        },
+        &test_session_spec(),
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+        None,
+    );
+
+    let volume_values = argument_values(&args, "--volume");
+    assert_eq!(
+        volume_values,
+        vec![
+            "/tmp/source,with,commas/methodology:/agentd/methodology:ro,z".to_string(),
+            "/tmp/audit,with,commas/runa:/home/site-builder/.agentd/audit/runa:rw,z".to_string(),
+        ]
+    );
+    assert!(
+        argument_values(&args, "--mount").is_empty(),
+        "comma-containing shared relabel sources should not use --mount: {args:?}"
     );
 }
 
@@ -1105,9 +1149,15 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
     let agent_name = "myagent";
 
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+    let additional_mount_source = fixture.create_methodology_dir("runner-additional-mount");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
         agent_name: agent_name.to_string(),
         methodology_dir,
+        mounts: vec![BindMount {
+            source: additional_mount_source,
+            target: PathBuf::from("/home/myagent/.claude"),
+            read_only: true,
+        }],
         environment: vec![ResolvedEnvironmentVariable {
             name: "GITHUB_TOKEN".to_string(),
             value: "test-token".to_string(),
@@ -1123,8 +1173,14 @@ fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_name
     let create_args = fixture.create_args();
     let container_name =
         argument_value(&create_args, "--name").expect("podman create should receive a name");
-    let mount_value =
-        argument_value(&create_args, "--mount").expect("podman create should receive a mount");
+    let create_arg_parts = create_args
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mount_value = argument_values(&create_arg_parts, "--mount")
+        .into_iter()
+        .find(|value| value.contains("/mount-0"))
+        .expect("podman create should receive a staged additional mount");
     let mount_source = mount_src_value(&mount_value).expect("mount should include src");
     let stage_dir_name = Path::new(&mount_source)
         .parent()
