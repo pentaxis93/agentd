@@ -241,6 +241,19 @@ fn notes_emit_the_matching_changelog_section_without_outer_blank_lines() {
 }
 
 #[test]
+fn notes_accept_release_candidate_tags_without_suffix_duplication() {
+    let fixture = valid_fixture("notes-rc-success", "1.2.3-rc.2");
+
+    let output = fixture.run_release_check(&["notes", "v1.2.3-rc.2"]);
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be utf-8"),
+        "### Added\n\n- Release ceremony tooling.\n"
+    );
+}
+
+#[test]
 fn release_rejects_tag_versions_that_do_not_match_workspace_version() {
     let fixture = valid_fixture("release-version-mismatch", "1.2.3");
 
@@ -340,6 +353,75 @@ esac
             fixture.root.join("fake-runtime"),
         )
         .env("FAKE_AGENTD_REF", "v1.2.3")
+        .output()
+        .expect("release-check should run");
+
+    assert_success(&output);
+}
+
+#[test]
+fn release_accepts_release_candidate_identity_without_suffix_duplication() {
+    let fixture = valid_fixture("release-rc-success", "1.2.3-rc.2");
+    fixture.write(
+        "fake-agentd",
+        "#!/usr/bin/env sh\nprintf 'agentd 1.2.3-rc.2\\n'\n",
+    );
+    fs::set_permissions(
+        fixture.root.join("fake-agentd"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("fake binary should be executable");
+    fixture.write(
+        "fake-runtime",
+        r#"#!/usr/bin/env sh
+set -eu
+case "$1" in
+  inspect)
+    printf '%s\n' "${FAKE_AGENTD_REF:?}"
+    ;;
+  create)
+    printf 'fake-container\n'
+    ;;
+  cp)
+    destination="$3"
+    cat >"$destination" <<'EOF'
+#!/usr/bin/env sh
+printf 'agentd 1.2.3-rc.2\n'
+EOF
+    chmod +x "$destination"
+    ;;
+  rm)
+    exit 0
+    ;;
+  *)
+    echo "unexpected fake-runtime command: $*" >&2
+    exit 64
+    ;;
+esac
+"#,
+    );
+    fs::set_permissions(
+        fixture.root.join("fake-runtime"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("fake runtime should be executable");
+
+    let output = Command::new("bash")
+        .arg(fixture.root.join("scripts/release-check"))
+        .args([
+            "release",
+            "v1.2.3-rc.2",
+            "--agentd-bin",
+            "fake-agentd",
+            "--container-image",
+            "localhost/agentd:v1.2.3-rc.2",
+        ])
+        .current_dir(&fixture.root)
+        .env(
+            "AGENTD_CONTAINER_RUNTIME",
+            fixture.root.join("fake-runtime"),
+        )
+        .env("FAKE_AGENTD_REF", "v1.2.3-rc.2")
         .output()
         .expect("release-check should run");
 
