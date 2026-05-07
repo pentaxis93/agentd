@@ -147,6 +147,7 @@ daemon source to an immutable tag or full commit SHA; do not deploy from `main`
 or another mutable branch ref. The shared release-candidate convention is
 defined in
 [commons RELEASE.md](https://github.com/tesserine/commons/blob/main/RELEASE.md).
+Repository release operations are described in [`RELEASING.md`](RELEASING.md).
 
 ```bash
 podman build \

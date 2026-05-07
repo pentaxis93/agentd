@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
+    paths:
+      - "CHANGELOG.md"
+      - "RELEASING.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/agentd/Cargo.toml"
+      - "crates/agentd-runner/Cargo.toml"
+      - "crates/agentd-scheduler/Cargo.toml"
+      - "Containerfile"
+      - "scripts/release-check"
+      - ".github/workflows/release.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "CHANGELOG.md"
+      - "RELEASING.md"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/agentd/Cargo.toml"
+      - "crates/agentd-runner/Cargo.toml"
+      - "crates/agentd-scheduler/Cargo.toml"
+      - "Containerfile"
+      - "scripts/release-check"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: Release metadata
+    if: github.ref_type != 'tag'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check release metadata
+        run: ./scripts/release-check metadata
+
+  publish:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require annotated tag
+        run: |
+          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: |
+          set -euo pipefail
+          git fetch --force origin refs/heads/main:refs/remotes/origin/main
+          tag_commit="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"
+          git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install container tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Build agentd binary
+        run: cargo build --release --locked --bin agentd
+
+      - name: Build agentd container image
+        run: |
+          podman build \
+            --build-arg "AGENTD_REF=$GITHUB_REF_NAME" \
+            --tag "localhost/agentd:$GITHUB_REF_NAME" \
+            .
+
+      - name: Verify release artifacts
+        run: |
+          ./scripts/release-check release "$GITHUB_REF_NAME" \
+            --agentd-bin target/release/agentd \
+            --container-image "localhost/agentd:$GITHUB_REF_NAME"
+
+      - name: Extract release notes
+        run: ./scripts/release-check notes "$GITHUB_REF_NAME" > release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "agentd $GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            "${release_flags[@]}"

@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follows the commons ADR-0006 workspace-version discipline and pins
   compliance-critical `cargo-release` behavior against user-level config
   fallthrough.
+- Release ceremony tooling now documents the operator workflow, checks
+  workspace, binary, container-label, extracted-CLI, and changelog identity,
+  and publishes GitHub Releases from annotated version tags.
 
 ### Changed
 

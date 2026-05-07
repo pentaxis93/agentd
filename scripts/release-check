@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+
+usage() {
+    cat <<'EOF'
+usage:
+  scripts/release-check metadata
+  scripts/release-check notes vX.Y.Z[-rc.N]
+  scripts/release-check release vX.Y.Z[-rc.N] [--agentd-bin PATH] [--container-image IMAGE]
+EOF
+}
+
+die() {
+    printf 'release-check: %s\n' "$*" >&2
+    exit 1
+}
+
+workspace_version() {
+    awk '
+        /^\[workspace\.package\]$/ {
+            inside = 1
+            next
+        }
+        inside && /^\[/ {
+            inside = 0
+        }
+        inside && /^version[[:space:]]*=/ {
+            value = $0
+            sub(/^[^"]*"/, "", value)
+            sub(/".*$/, "", value)
+            print value
+            exit
+        }
+    ' "$repo_root/Cargo.toml"
+}
+
+release_from_tag() {
+    local tag="$1"
+    [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?)$ ]] \
+        || die "release version must look like vX.Y.Z or vX.Y.Z-rc.N: $tag"
+    printf '%s.%s.%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
+}
+
+check_workspace_version_present() {
+    local version
+    version="$(workspace_version)"
+    [[ -n "$version" ]] || die "workspace package version not found in Cargo.toml"
+}
+
+check_workspace_crates_inherit_version() {
+    local manifest
+    for manifest in \
+        "$repo_root/crates/agentd/Cargo.toml" \
+        "$repo_root/crates/agentd-runner/Cargo.toml" \
+        "$repo_root/crates/agentd-scheduler/Cargo.toml"
+    do
+        [[ -f "$manifest" ]] || die "workspace crate manifest not found: ${manifest#$repo_root/}"
+        grep -Eq '^version\.workspace[[:space:]]*=[[:space:]]*true$' "$manifest" \
+            || die "${manifest#$repo_root/} must inherit version.workspace = true"
+    done
+}
+
+check_cargo_lock_versions() {
+    local lockfile="$repo_root/Cargo.lock"
+    local version
+    version="$(workspace_version)"
+    [[ -f "$lockfile" ]] || die "Cargo.lock not found"
+
+    awk -v expected="$version" '
+        BEGIN {
+            wanted["agentd"] = 1
+            wanted["agentd-runner"] = 1
+            wanted["agentd-scheduler"] = 1
+        }
+
+        function trim(value) {
+            sub(/^[^"]*"/, "", value)
+            sub(/".*$/, "", value)
+            return value
+        }
+
+        function check_package() {
+            if (name in wanted) {
+                seen[name] = 1
+                if (version != expected) {
+                    print "Cargo.lock package " name " version " version " does not match workspace version " expected > "/dev/stderr"
+                    exit 1
+                }
+            }
+        }
+
+        /^\[\[package\]\]$/ {
+            check_package()
+            name = ""
+            version = ""
+            next
+        }
+
+        /^name[[:space:]]*=/ {
+            name = trim($0)
+            next
+        }
+
+        /^version[[:space:]]*=/ {
+            version = trim($0)
+            next
+        }
+
+        END {
+            check_package()
+            for (package_name in wanted) {
+                if (!(package_name in seen)) {
+                    print "Cargo.lock package " package_name " not found" > "/dev/stderr"
+                    exit 1
+                }
+            }
+        }
+    ' "$lockfile" || exit 1
+}
+
+check_containerfile_identity_surface() {
+    local containerfile="$repo_root/Containerfile"
+    [[ -f "$containerfile" ]] || die "Containerfile not found"
+    grep -Eq '^ARG[[:space:]]+AGENTD_REF=' "$containerfile" \
+        || die "Containerfile must declare ARG AGENTD_REF"
+    grep -Fq 'org.tesserine.agentd.ref="${AGENTD_REF}"' "$containerfile" \
+        || die "Containerfile must set org.tesserine.agentd.ref from AGENTD_REF"
+    grep -Fq '/usr/local/bin/agentd' "$containerfile" \
+        || die "Containerfile must install the host CLI at /usr/local/bin/agentd"
+}
+
+check_changelog_structure() {
+    local changelog="$repo_root/CHANGELOG.md"
+    [[ -f "$changelog" ]] || die "CHANGELOG.md not found"
+
+    local unreleased_count
+    unreleased_count="$(grep -c '^## \[Unreleased\]$' "$changelog" || true)"
+    [[ "$unreleased_count" == "1" ]] \
+        || die "CHANGELOG.md must contain exactly one ## [Unreleased] heading"
+
+    awk '
+        /^## / {
+            if ($0 == "## [Unreleased]") {
+                if (seen_release) {
+                    print "CHANGELOG.md places ## [Unreleased] after a release heading" > "/dev/stderr"
+                    exit 1
+                }
+                next
+            }
+
+            if ($0 !~ /^## \[[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*(-[0-9A-Za-z][0-9A-Za-z.-]*)?\] — [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) {
+                print "CHANGELOG.md release heading is malformed: " $0 > "/dev/stderr"
+                exit 1
+            }
+
+            seen_release = 1
+        }
+    ' "$changelog" || exit 1
+}
+
+check_release_heading() {
+    local version="$1"
+    grep -Eq "^## \\[$version\\] — [0-9]{4}-[0-9]{2}-[0-9]{2}$" "$repo_root/CHANGELOG.md" \
+        || die "CHANGELOG.md has no release heading for [$version]"
+}
+
+check_release_version() {
+    local version="$1"
+    local current
+    current="$(workspace_version)"
+    [[ "$current" == "$version" ]] \
+        || die "workspace version $current does not match tag version $version"
+}
+
+check_agentd_binary() {
+    local version="$1"
+    local bin="$2"
+    if [[ "$bin" != /* ]]; then
+        bin="$repo_root/$bin"
+    fi
+    [[ -x "$bin" ]] || die "agentd binary is not executable: $bin"
+
+    local output
+    output="$("$bin" --version)"
+    [[ "$output" == "agentd $version" ]] \
+        || die "agentd binary reports '$output', expected 'agentd $version'"
+}
+
+container_runtime() {
+    if [[ -n "${AGENTD_CONTAINER_RUNTIME:-}" ]]; then
+        command -v "$AGENTD_CONTAINER_RUNTIME" >/dev/null 2>&1 \
+            || die "configured container runtime not found: $AGENTD_CONTAINER_RUNTIME"
+        printf '%s\n' "$AGENTD_CONTAINER_RUNTIME"
+    elif command -v podman >/dev/null 2>&1; then
+        printf 'podman\n'
+    elif command -v docker >/dev/null 2>&1; then
+        printf 'docker\n'
+    else
+        die "podman or docker is required for --container-image checks"
+    fi
+}
+
+check_container_image() {
+    local tag="$1"
+    local version="$2"
+    local image="$3"
+    local runtime label container_id extracted_cli scratch
+
+    runtime="$(container_runtime)"
+    label="$("$runtime" inspect --format '{{ index .Config.Labels "org.tesserine.agentd.ref" }}' "$image")"
+    [[ "$label" == "$tag" ]] \
+        || die "container image label org.tesserine.agentd.ref is '$label', expected '$tag'"
+
+    scratch="$(mktemp -d)"
+    container_id="$("$runtime" create "$image")"
+    extracted_cli="$scratch/agentd"
+    "$runtime" cp "$container_id:/usr/local/bin/agentd" "$extracted_cli"
+    "$runtime" rm -f "$container_id" >/dev/null
+    chmod +x "$extracted_cli"
+    check_agentd_binary "$version" "$extracted_cli"
+    rm -rf "$scratch"
+}
+
+emit_notes() {
+    local version="$1"
+    awk -v prefix="## [$version] — " -v version="$version" '
+        index($0, prefix) == 1 {
+            found = 1
+            inside = 1
+            next
+        }
+        inside && /^## / {
+            exit
+        }
+        inside {
+            lines[++line_count] = $0
+        }
+        END {
+            if (!found) {
+                print "CHANGELOG.md has no release heading for [" version "]" > "/dev/stderr"
+                exit 1
+            }
+
+            first = 1
+            while (first <= line_count && lines[first] == "") {
+                first++
+            }
+
+            last = line_count
+            while (last >= first && lines[last] == "") {
+                last--
+            }
+
+            for (i = first; i <= last; i++) {
+                print lines[i]
+            }
+        }
+    ' "$repo_root/CHANGELOG.md"
+}
+
+run_metadata() {
+    check_workspace_version_present
+    check_workspace_crates_inherit_version
+    check_cargo_lock_versions
+    check_containerfile_identity_surface
+    check_changelog_structure
+}
+
+run_release() {
+    local tag="$1"
+    shift
+
+    local version agentd_bin="" container_image=""
+    version="$(release_from_tag "$tag")"
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --agentd-bin)
+                [[ "$#" -ge 2 ]] || die "--agentd-bin requires a path"
+                agentd_bin="$2"
+                shift 2
+                ;;
+            --container-image)
+                [[ "$#" -ge 2 ]] || die "--container-image requires an image"
+                container_image="$2"
+                shift 2
+                ;;
+            *)
+                die "unknown release option: $1"
+                ;;
+        esac
+    done
+
+    run_metadata
+    check_release_version "$version"
+    check_release_heading "$version"
+    [[ -z "$agentd_bin" ]] || check_agentd_binary "$version" "$agentd_bin"
+    [[ -z "$container_image" ]] || check_container_image "$tag" "$version" "$container_image"
+}
+
+main() {
+    [[ "$#" -ge 1 ]] || {
+        usage >&2
+        exit 2
+    }
+
+    case "$1" in
+        metadata)
+            [[ "$#" == 1 ]] || die "metadata takes no arguments"
+            run_metadata
+            ;;
+        notes)
+            [[ "$#" == 2 ]] || die "notes requires exactly one vX.Y.Z[-rc.N] argument"
+            emit_notes "$(release_from_tag "$2")"
+            ;;
+        release)
+            [[ "$#" -ge 2 ]] || die "release requires a vX.Y.Z[-rc.N] argument"
+            shift
+            run_release "$@"
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"
