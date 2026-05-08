@@ -19,22 +19,56 @@ die() {
 }
 
 workspace_version() {
+    local root="${1:-$repo_root}"
+
     awk '
-        /^\[workspace\.package\]$/ {
+        /^[[:space:]]*\[workspace\.package\][[:space:]]*(#.*)?$/ {
             inside = 1
             next
         }
-        inside && /^\[/ {
+        inside && /^[[:space:]]*\[/ {
             inside = 0
         }
-        inside && /^version[[:space:]]*=/ {
+        inside && /^[[:space:]]*version[[:space:]]*=/ {
             value = $0
             sub(/^[^"]*"/, "", value)
             sub(/".*$/, "", value)
             print value
             exit
         }
-    ' "$repo_root/Cargo.toml"
+    ' "$root/Cargo.toml"
+}
+
+require_jq() {
+    command -v jq >/dev/null 2>&1 || die "jq is required for workspace metadata checks"
+}
+
+workspace_metadata() {
+    local root="${1:-$repo_root}"
+
+    cargo metadata --no-deps --format-version 1 --manifest-path "$root/Cargo.toml"
+}
+
+workspace_package_manifest_paths() {
+    local root="${1:-$repo_root}"
+
+    workspace_metadata "$root" | jq -r '
+        .workspace_members as $members
+        | .packages[]
+        | select(.id as $id | $members | index($id))
+        | .manifest_path
+    '
+}
+
+workspace_package_names() {
+    local root="${1:-$repo_root}"
+
+    workspace_metadata "$root" | jq -r '
+        .workspace_members as $members
+        | .packages[]
+        | select(.id as $id | $members | index($id))
+        | .name
+    '
 }
 
 release_from_tag() {
@@ -59,28 +93,29 @@ check_workspace_version_present() {
 
 check_workspace_crates_inherit_version() {
     local manifest
-    for manifest in \
-        "$repo_root/crates/agentd/Cargo.toml" \
-        "$repo_root/crates/agentd-runner/Cargo.toml" \
-        "$repo_root/crates/agentd-scheduler/Cargo.toml"
-    do
+    while IFS= read -r manifest; do
+        [[ -n "$manifest" ]] || continue
         [[ -f "$manifest" ]] || die "workspace crate manifest not found: ${manifest#$repo_root/}"
-        grep -Eq '^version\.workspace[[:space:]]*=[[:space:]]*true$' "$manifest" \
+        grep -Eq '^[[:space:]]*version\.workspace[[:space:]]*=[[:space:]]*true$' "$manifest" \
             || die "${manifest#$repo_root/} must inherit version.workspace = true"
-    done
+    done < <(workspace_package_manifest_paths)
 }
 
 check_cargo_lock_versions() {
     local lockfile="$repo_root/Cargo.lock"
-    local version
+    local package_names version
     version="$(workspace_version)"
+    package_names="$(workspace_package_names)"
     [[ -f "$lockfile" ]] || die "Cargo.lock not found"
 
-    awk -v expected="$version" '
+    awk -v expected="$version" -v package_names="$package_names" '
         BEGIN {
-            wanted["agentd"] = 1
-            wanted["agentd-runner"] = 1
-            wanted["agentd-scheduler"] = 1
+            split(package_names, names, "\n")
+            for (i in names) {
+                if (names[i] != "") {
+                    wanted[names[i]] = 1
+                }
+            }
         }
 
         function trim(value) {
@@ -279,6 +314,7 @@ emit_notes() {
 }
 
 run_metadata() {
+    require_jq
     check_workspace_version_present
     check_workspace_crates_inherit_version
     check_cargo_lock_versions
@@ -348,4 +384,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

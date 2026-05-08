@@ -1,8 +1,8 @@
 # Releasing agentd
 
 Audience: the release operator cutting an agentd repository release or release
-candidate. This document assumes access to the repository, GitHub, Rust, and a
-local container runtime compatible with Docker or Podman commands.
+candidate. This document assumes access to the repository, GitHub, Rust, `jq`,
+and a local container runtime compatible with Docker or Podman commands.
 
 ## Release Identity
 
@@ -77,7 +77,7 @@ The tag push runs `.github/workflows/release.yml`. That workflow verifies the
 annotated tag, builds the release binary, builds a local container image with
 `AGENTD_REF` set to the tag, verifies the workspace/binary/container identity,
 extracts release notes from `CHANGELOG.md`, and publishes the GitHub Release.
-Tags containing a prerelease suffix are published as GitHub prereleases.
+Only `vX.Y.Z-rc.N` tags are published as GitHub prereleases.
 
 Manual GitHub Release creation, when needed after a workflow failure, uses the
 same notes source:

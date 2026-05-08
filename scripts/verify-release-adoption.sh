@@ -5,6 +5,7 @@ workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 real_home="${HOME:?}"
 cargo_home="${CARGO_HOME:-$real_home/.cargo}"
 rustup_home="${RUSTUP_HOME:-$real_home/.rustup}"
+source "$workspace_root/scripts/release-check"
 
 if ! cargo release --version >/dev/null 2>&1; then
     echo "cargo-release is required: install the cargo-release cargo subcommand" >&2
@@ -51,10 +52,6 @@ seed_release_repo() {
     git -C "$source_repo" push -q -u origin main
 }
 
-workspace_version() {
-    sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' "$1/Cargo.toml"
-}
-
 assert_release_commit_state() {
     local source_repo="$1"
     local remote_repo="$2"
@@ -89,6 +86,19 @@ assert_release_commit_state() {
         echo "$tag_name was not pushed to the remote" >&2
         exit 1
     fi
+}
+
+verify_fresh_release_checkout() {
+    local fresh_checkout="$1"
+    local remote_repo="$2"
+    local tag_name="$3"
+
+    git clone -q "$remote_repo" "$fresh_checkout"
+    git -C "$fresh_checkout" checkout -q "$tag_name"
+    (
+        cd "$fresh_checkout"
+        ./scripts/release-check release "$tag_name"
+    )
 }
 
 seed_release_repo "$stable_source_repo" "$stable_remote_repo"
@@ -157,8 +167,7 @@ if grep -Fq "Uploading" "$stable_release_log"; then
     exit 1
 fi
 
-git clone -q "$stable_remote_repo" "$stable_fresh_checkout"
-git -C "$stable_fresh_checkout" checkout -q "$tag_name"
+verify_fresh_release_checkout "$stable_fresh_checkout" "$stable_remote_repo" "$tag_name"
 cargo build --release -p agentd --manifest-path "$stable_fresh_checkout/Cargo.toml"
 
 version_output="$("$stable_fresh_checkout/target/release/agentd" --version)"
@@ -192,11 +201,6 @@ if grep -Fq "Uploading" "$rc_release_log"; then
     exit 1
 fi
 
-git clone -q "$rc_remote_repo" "$rc_fresh_checkout"
-git -C "$rc_fresh_checkout" checkout -q "$tag_name"
-(
-    cd "$rc_fresh_checkout"
-    ./scripts/release-check release "$tag_name"
-)
+verify_fresh_release_checkout "$rc_fresh_checkout" "$rc_remote_repo" "$tag_name"
 
 echo "verified RC release adoption for $tag_name"

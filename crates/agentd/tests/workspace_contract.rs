@@ -27,6 +27,89 @@ fn string_array(values: &[&str]) -> Vec<toml::Value> {
         .collect()
 }
 
+fn release_workflow_tag_patterns() -> Vec<String> {
+    let workflow = read_workspace_file(".github/workflows/release.yml");
+    let mut patterns = Vec::new();
+    let mut in_tags = false;
+
+    for line in workflow.lines() {
+        if line == "    tags:" {
+            in_tags = true;
+            continue;
+        }
+
+        if in_tags {
+            if !line.starts_with("      - ") {
+                break;
+            }
+            patterns.push(
+                line.trim()
+                    .trim_start_matches("- ")
+                    .trim_matches('"')
+                    .to_string(),
+            );
+        }
+    }
+
+    patterns
+}
+
+fn documented_actions_pattern_matches(pattern: &str, candidate: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let candidate = candidate.as_bytes();
+    let mut pattern_index = 0;
+    let mut candidate_index = 0;
+
+    while pattern_index < pattern.len() {
+        if pattern[pattern_index] == b'[' {
+            let range_end = pattern[pattern_index..]
+                .iter()
+                .position(|byte| *byte == b']')
+                .map(|offset| pattern_index + offset)
+                .expect("test pattern character class should close");
+            assert_eq!(
+                &pattern[pattern_index..=range_end],
+                b"[0-9]",
+                "test matcher only models the documented digit class used by release tags"
+            );
+            let one_or_more = pattern.get(range_end + 1) == Some(&b'+');
+            let start = candidate_index;
+            while candidate
+                .get(candidate_index)
+                .is_some_and(u8::is_ascii_digit)
+            {
+                candidate_index += 1;
+            }
+            if one_or_more {
+                if candidate_index == start {
+                    return false;
+                }
+                pattern_index = range_end + 2;
+            } else {
+                if candidate_index != start + 1 {
+                    return false;
+                }
+                pattern_index = range_end + 1;
+            }
+            continue;
+        }
+
+        if candidate.get(candidate_index) != pattern.get(pattern_index) {
+            return false;
+        }
+        pattern_index += 1;
+        candidate_index += 1;
+    }
+
+    candidate_index == candidate.len()
+}
+
+fn matches_any_documented_actions_pattern(patterns: &[String], candidate: &str) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| documented_actions_pattern_matches(pattern, candidate))
+}
+
 #[test]
 fn workspace_metadata_lists_only_grounded_crates() {
     let output = Command::new("cargo")
@@ -226,6 +309,38 @@ fn release_adoption_verification_exercises_the_rc_release_path() {
 }
 
 #[test]
+fn release_adoption_verification_exercises_release_check_for_stable_and_rc_tags() {
+    let script = read_workspace_file("scripts/verify-release-adoption.sh");
+
+    assert!(
+        script.contains(
+            "verify_fresh_release_checkout \"$stable_fresh_checkout\" \"$stable_remote_repo\" \"$tag_name\""
+        ),
+        "release verification should run release-check release against the stable tag checkout"
+    );
+    assert!(
+        script.contains(
+            "verify_fresh_release_checkout \"$rc_fresh_checkout\" \"$rc_remote_repo\" \"$tag_name\""
+        ),
+        "release verification should run release-check release against the RC tag checkout"
+    );
+}
+
+#[test]
+fn release_adoption_verification_uses_release_check_as_the_workspace_version_parser() {
+    let script = read_workspace_file("scripts/verify-release-adoption.sh");
+
+    assert!(
+        script.contains("source \"$workspace_root/scripts/release-check\""),
+        "release verification should source release-check instead of defining a second parser"
+    );
+    assert!(
+        !script.contains("sed -n '/^\\[workspace.package\\]/"),
+        "release verification should not parse workspace versions with its own sed expression"
+    );
+}
+
+#[test]
 fn release_candidate_documentation_uses_the_shared_cargo_release_path() {
     let releasing = read_workspace_file("RELEASING.md");
 
@@ -261,20 +376,107 @@ fn changelog_release_rolls_are_enabled_for_release_candidates() {
 
 #[test]
 fn github_release_workflow_triggers_only_for_documented_tag_shapes() {
+    let patterns = release_workflow_tag_patterns();
+
+    assert!(
+        !patterns.iter().any(|pattern| pattern == "v*.*.*"),
+        "release workflow should not trigger on arbitrary v*.*.* tags"
+    );
+    assert_eq!(
+        patterns,
+        ["v[0-9]+.[0-9]+.[0-9]+", "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"],
+        "release workflow should trigger only documented stable and RC tag shapes"
+    );
+}
+
+#[test]
+fn github_release_workflow_tag_filters_match_the_documented_release_contract() {
+    let patterns = release_workflow_tag_patterns();
+
+    for accepted in ["v0.1.2", "v10.20.300", "v0.1.2-rc.1", "v10.20.300-rc.400"] {
+        assert!(
+            matches_any_documented_actions_pattern(&patterns, accepted),
+            "release workflow tag filters should match documented tag {accepted}"
+        );
+    }
+
+    for rejected in [
+        "v0.1",
+        "v0.1.2.3",
+        "v0.1.2-beta.1",
+        "v0.1.2-rc",
+        "v0.1.2-rc.x",
+        "agentd-v0.1.2",
+    ] {
+        assert!(
+            !matches_any_documented_actions_pattern(&patterns, rejected),
+            "release workflow tag filters should reject undocumented tag {rejected}"
+        );
+    }
+}
+
+#[test]
+fn github_release_publication_is_not_coupled_to_path_filters() {
     let workflow = read_workspace_file(".github/workflows/release.yml");
 
     assert!(
-        !workflow.contains("\"v*.*.*\""),
-        "release workflow should not trigger on arbitrary v*.*.* tags"
+        workflow.contains("    tags:"),
+        "release publication workflow should be triggered by release tags"
     );
     assert!(
-        workflow.contains("\"v[0-9]+.[0-9]+.[0-9]+\"")
-            && workflow.contains("\"v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+\""),
-        "release workflow should trigger only documented stable and RC tag shapes"
+        !workflow.contains("    paths:"),
+        "release publication workflow should not path-filter tag pushes"
+    );
+}
+
+#[test]
+fn release_metadata_workflow_keeps_path_filtered_branch_and_pr_checks() {
+    let workflow = read_workspace_file(".github/workflows/release-metadata.yml");
+
+    assert!(
+        workflow.contains("name: Release Metadata"),
+        "release metadata workflow should exist separately from tag publication"
+    );
+    assert!(
+        workflow.contains("  push:") && workflow.contains("    branches: [main]"),
+        "release metadata workflow should run on main branch pushes"
+    );
+    assert!(
+        workflow.contains("  pull_request:") && workflow.contains("    paths:"),
+        "release metadata workflow should retain PR path filtering"
+    );
+    assert!(
+        workflow.contains("./scripts/release-check metadata"),
+        "release metadata workflow should run release-check metadata"
+    );
+}
+
+#[test]
+fn github_release_workflow_marks_only_rc_tags_as_prereleases() {
+    let workflow = read_workspace_file(".github/workflows/release.yml");
+
+    assert!(
+        workflow.contains("^v[0-9]+[.][0-9]+[.][0-9]+-rc[.][0-9]+$"),
+        "release workflow should mark only documented RC tags as GitHub prereleases"
     );
     assert!(
         !workflow.contains("[[ \"$GITHUB_REF_NAME\" == *-* ]]"),
         "release workflow should not treat every hyphenated tag as a prerelease"
+    );
+}
+
+#[test]
+fn release_documentation_describes_rc_only_github_prerelease_publication() {
+    let releasing = read_workspace_file("RELEASING.md");
+
+    assert!(
+        releasing.contains("Only `vX.Y.Z-rc.N` tags are published as GitHub prereleases."),
+        "RELEASING.md should describe prerelease publication with the same RC precision as the workflow"
+    );
+    assert!(
+        !releasing
+            .contains("Tags containing a prerelease suffix are published as GitHub prereleases."),
+        "RELEASING.md should not imply every prerelease suffix is published as a GitHub prerelease"
     );
 }
 

@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release governance checks now cover workflow tag matching behavior, decouple
+  tag publication from path-filtered metadata checks, derive release metadata
+  validation from workspace members, and use one workspace-version parser across
+  release scripts.
 - Release verification now rejects unsupported prerelease tag shapes, and the
   documented release-candidate `cargo-release` path now rolls the changelog
   before tagging.
