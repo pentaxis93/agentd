@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follows the commons ADR-0006 workspace-version discipline and pins
   compliance-critical `cargo-release` behavior against user-level config
   fallthrough.
+- Release ceremony tooling now documents the operator workflow, checks
+  workspace, binary, container-label, extracted-CLI, and changelog identity,
+  and publishes GitHub Releases from annotated version tags.
 
 ### Changed
 
@@ -41,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release governance checks now cover workflow tag matching behavior, decouple
+  tag publication from path-filtered metadata checks, derive release metadata
+  validation from workspace members, and use one workspace-version parser across
+  release scripts.
+- Release verification now rejects unsupported prerelease tag shapes, and the
+  documented release-candidate `cargo-release` path now rolls the changelog
+  before tagging.
 - Runner-owned SELinux relabelled mounts now pass canonical host source paths
   to Podman, so FCOS Enforcing deployments relabel the real audit `runa/`
   subtree instead of a staging alias before `runa init`.
