@@ -212,6 +212,73 @@ fn release_adoption_verification_checks_hostile_user_config_cannot_override_work
 }
 
 #[test]
+fn release_adoption_verification_exercises_the_rc_release_path() {
+    let script = read_workspace_file("scripts/verify-release-adoption.sh");
+
+    assert!(
+        script.contains("cargo release rc --execute --no-confirm"),
+        "release verification should run the documented RC release command"
+    );
+    assert!(
+        script.contains("./scripts/release-check release \"$tag_name\""),
+        "release verification should prove the RC tag passes release-check release"
+    );
+}
+
+#[test]
+fn release_candidate_documentation_uses_the_shared_cargo_release_path() {
+    let releasing = read_workspace_file("RELEASING.md");
+
+    assert!(
+        releasing.contains("cargo release rc --execute"),
+        "RELEASING.md should document the shared RC cargo-release path"
+    );
+    assert!(
+        !releasing.contains("cargo release --config release.toml --isolated rc --execute"),
+        "RELEASING.md should not document an isolated RC release path"
+    );
+}
+
+#[test]
+fn changelog_release_rolls_are_enabled_for_release_candidates() {
+    let manifest = read_workspace_toml("crates/agentd/Cargo.toml");
+    let replacements = manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("release"))
+        .and_then(|release| release.get("pre-release-replacements"))
+        .and_then(toml::Value::as_array)
+        .expect("agentd should declare cargo-release replacements");
+
+    assert!(
+        replacements.iter().any(|replacement| {
+            replacement.get("file").and_then(toml::Value::as_str) == Some("../../CHANGELOG.md")
+                && replacement.get("prerelease").and_then(toml::Value::as_bool) == Some(true)
+        }),
+        "CHANGELOG.md replacement should run during RC releases"
+    );
+}
+
+#[test]
+fn github_release_workflow_triggers_only_for_documented_tag_shapes() {
+    let workflow = read_workspace_file(".github/workflows/release.yml");
+
+    assert!(
+        !workflow.contains("\"v*.*.*\""),
+        "release workflow should not trigger on arbitrary v*.*.* tags"
+    );
+    assert!(
+        workflow.contains("\"v[0-9]+.[0-9]+.[0-9]+\"")
+            && workflow.contains("\"v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+\""),
+        "release workflow should trigger only documented stable and RC tag shapes"
+    );
+    assert!(
+        !workflow.contains("[[ \"$GITHUB_REF_NAME\" == *-* ]]"),
+        "release workflow should not treat every hyphenated tag as a prerelease"
+    );
+}
+
+#[test]
 fn removed_crate_directories_are_absent() {
     let workspace_root = workspace_root();
 

@@ -64,7 +64,7 @@ configured changelog roll, commits, creates an annotated tag named
 Deployment release candidates use the same tool path:
 
 ```sh
-cargo release --config release.toml --isolated rc --execute
+cargo release rc --execute
 ```
 
 Release candidates are immutable refs for deployment testing. A bad or

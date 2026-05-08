@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release verification now rejects unsupported prerelease tag shapes, and the
+  documented release-candidate `cargo-release` path now rolls the changelog
+  before tagging.
 - Runner-owned SELinux relabelled mounts now pass canonical host source paths
   to Podman, so FCOS Enforcing deployments relabel the real audit `runa/`
   subtree instead of a staging alias before `runa init`.

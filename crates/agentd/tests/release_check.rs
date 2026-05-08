@@ -228,6 +228,36 @@ fn metadata_rejects_malformed_changelog_release_headings() {
 }
 
 #[test]
+fn metadata_rejects_unsupported_workspace_prerelease_versions() {
+    let fixture = valid_fixture("metadata-unsupported-workspace-prerelease", "1.2.3-beta.1");
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "workspace version must look like X.Y.Z or X.Y.Z-rc.N: 1.2.3-beta.1",
+    );
+}
+
+#[test]
+fn metadata_rejects_unsupported_changelog_prerelease_headings() {
+    let fixture = valid_fixture("metadata-unsupported-changelog-prerelease", "1.2.3");
+    fixture.write(
+        "CHANGELOG.md",
+        r#"# Changelog
+
+## [Unreleased]
+
+## [1.2.3-beta.1] — 2026-05-07
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(&output, "release heading is malformed");
+}
+
+#[test]
 fn notes_emit_the_matching_changelog_section_without_outer_blank_lines() {
     let fixture = valid_fixture("notes-success", "1.2.3");
 
@@ -250,6 +280,42 @@ fn notes_accept_release_candidate_tags_without_suffix_duplication() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be utf-8"),
         "### Added\n\n- Release ceremony tooling.\n"
+    );
+}
+
+#[test]
+fn notes_rejects_unsupported_beta_release_candidate_tags() {
+    let fixture = valid_fixture("notes-beta-tag", "1.2.3-beta.1");
+
+    let output = fixture.run_release_check(&["notes", "v1.2.3-beta.1"]);
+
+    assert_failure_contains(
+        &output,
+        "release version must look like vX.Y.Z or vX.Y.Z-rc.N: v1.2.3-beta.1",
+    );
+}
+
+#[test]
+fn notes_rejects_release_candidate_tags_without_a_numeric_suffix() {
+    let fixture = valid_fixture("notes-rc-no-number-tag", "1.2.3-rc");
+
+    let output = fixture.run_release_check(&["notes", "v1.2.3-rc"]);
+
+    assert_failure_contains(
+        &output,
+        "release version must look like vX.Y.Z or vX.Y.Z-rc.N: v1.2.3-rc",
+    );
+}
+
+#[test]
+fn notes_rejects_unsupported_alpha_release_candidate_tags() {
+    let fixture = valid_fixture("notes-alpha-tag", "1.2.3-alpha.2.3");
+
+    let output = fixture.run_release_check(&["notes", "v1.2.3-alpha.2.3"]);
+
+    assert_failure_contains(
+        &output,
+        "release version must look like vX.Y.Z or vX.Y.Z-rc.N: v1.2.3-alpha.2.3",
     );
 }
 
@@ -426,6 +492,40 @@ esac
         .expect("release-check should run");
 
     assert_success(&output);
+}
+
+#[test]
+fn release_rejects_changelog_headings_that_only_regex_match_the_tag_version() {
+    let fixture = valid_fixture("release-regex-matched-heading", "1.2.3-rc.2");
+    fixture.write(
+        "CHANGELOG.md",
+        r#"# Changelog
+
+## [Unreleased]
+
+## [1.2.3-rcZ2] — 2026-05-07
+
+### Added
+
+- Release ceremony tooling.
+"#,
+    );
+
+    let output = fixture.run_release_check(&["release", "v1.2.3-rc.2"]);
+
+    assert_failure_contains(&output, "release heading");
+}
+
+#[test]
+fn release_heading_lookup_does_not_interpolate_versions_into_extended_regexes() {
+    let fixture = valid_fixture("release-heading-regex-shape", "1.2.3");
+    let script = fs::read_to_string(fixture.root.join("scripts/release-check"))
+        .expect("release-check script should be readable");
+
+    assert!(
+        !script.contains("grep -Eq \"^## \\\\[$version\\\\]"),
+        "release heading lookup must not interpolate the version into grep -E"
+    );
 }
 
 #[test]
