@@ -135,6 +135,34 @@ LABEL org.tesserine.agentd.ref="${AGENTD_REF}"
 COPY --from=builder /workspace/target/release/agentd /usr/local/bin/agentd
 "#,
     );
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
     fixture.install_release_check();
     fixture
 }
@@ -211,6 +239,17 @@ fn metadata_accepts_a_coherent_agentd_release_surface() {
     let output = fixture.run_release_check(&["metadata"]);
 
     assert_success(&output);
+}
+
+#[test]
+fn metadata_accepts_canonical_semver_release_versions() {
+    for version in ["0.0.0", "1.2.3-rc.1"] {
+        let fixture = valid_fixture(&format!("metadata-canonical-{version}"), version);
+
+        let output = fixture.run_release_check(&["metadata"]);
+
+        assert_success(&output);
+    }
 }
 
 #[test]
@@ -378,6 +417,20 @@ fn metadata_rejects_unsupported_workspace_prerelease_versions() {
 }
 
 #[test]
+fn metadata_rejects_workspace_versions_with_noncanonical_numeric_components() {
+    for version in ["01.2.3", "1.02.3", "1.2.03", "1.2.3-rc.01", "1.2.3-rc.0"] {
+        let fixture = valid_fixture(&format!("metadata-noncanonical-{version}"), version);
+
+        let output = fixture.run_release_check(&["metadata"]);
+
+        assert_failure_contains(
+            &output,
+            &format!("workspace version must look like X.Y.Z or X.Y.Z-rc.N: {version}"),
+        );
+    }
+}
+
+#[test]
 fn metadata_rejects_unsupported_changelog_prerelease_headings() {
     let fixture = valid_fixture("metadata-unsupported-changelog-prerelease", "1.2.3");
     fixture.write(
@@ -393,6 +446,130 @@ fn metadata_rejects_unsupported_changelog_prerelease_headings() {
     let output = fixture.run_release_check(&["metadata"]);
 
     assert_failure_contains(&output, "release heading is malformed");
+}
+
+#[test]
+fn metadata_rejects_changelog_headings_with_noncanonical_numeric_components() {
+    for version in ["01.2.3", "1.02.3", "1.2.03", "1.2.3-rc.01", "1.2.3-rc.0"] {
+        let fixture = valid_fixture(
+            &format!("metadata-changelog-noncanonical-{version}"),
+            "1.2.3",
+        );
+        fixture.write(
+            "CHANGELOG.md",
+            &format!(
+                r#"# Changelog
+
+## [Unreleased]
+
+## [{version}] — 2026-05-07
+"#
+            ),
+        );
+
+        let output = fixture.run_release_check(&["metadata"]);
+
+        assert_failure_contains(&output, "release heading is malformed");
+    }
+}
+
+#[test]
+fn metadata_rejects_release_workflows_without_early_tag_validation() {
+    let fixture = valid_fixture("metadata-workflow-missing-validation", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(&output, "validate the release tag before container setup");
+}
+
+#[test]
+fn metadata_rejects_release_workflows_that_validate_tags_after_container_setup() {
+    let fixture = valid_fixture("metadata-workflow-late-validation", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(&output, "validate the release tag before container setup");
+}
+
+#[test]
+fn metadata_rejects_release_workflows_that_validate_tags_before_tag_trust() {
+    let fixture = valid_fixture("metadata-workflow-pretrust-validation", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "establish tag trust before running repository code",
+    );
 }
 
 #[test]
@@ -455,6 +632,26 @@ fn notes_rejects_unsupported_alpha_release_candidate_tags() {
         &output,
         "release version must look like vX.Y.Z or vX.Y.Z-rc.N: v1.2.3-alpha.2.3",
     );
+}
+
+#[test]
+fn notes_rejects_tags_with_noncanonical_numeric_components() {
+    let fixture = valid_fixture("notes-noncanonical-tags", "1.2.3");
+
+    for tag in [
+        "v01.2.3",
+        "v1.02.3",
+        "v1.2.03",
+        "v1.2.3-rc.01",
+        "v1.2.3-rc.0",
+    ] {
+        let output = fixture.run_release_check(&["notes", tag]);
+
+        assert_failure_contains(
+            &output,
+            &format!("release version must look like vX.Y.Z or vX.Y.Z-rc.N: {tag}"),
+        );
+    }
 }
 
 #[test]

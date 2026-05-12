@@ -10,6 +10,11 @@ agentd uses one repository tag for the Rust workspace, daemon container image,
 and host CLI extracted from that image. The tag is `vX.Y.Z` for stable
 releases and `vX.Y.Z-rc.N` for deployment release candidates.
 
+Release tags follow Semantic Versioning 2.0.0 numeric grammar as codified by
+commons ADR-0012: each integer is either `0` or a non-zero digit followed by
+zero or more digits. Release candidate numbering starts at `rc.1`; `rc.0` and
+leading-zero numeric identifiers are not valid release tags.
+
 Artifacts built from the tag must report that identity:
 
 - `Cargo.toml` `[workspace.package].version` is `X.Y.Z` or `X.Y.Z-rc.N`.
@@ -74,10 +79,11 @@ the existing tag.
 ## Post-Release Gate
 
 The tag push runs `.github/workflows/release.yml`. That workflow verifies the
-annotated tag, builds the release binary, builds a local container image with
-`AGENTD_REF` set to the tag, verifies the workspace/binary/container identity,
-extracts release notes from `CHANGELOG.md`, and publishes the GitHub Release.
-Only `vX.Y.Z-rc.N` tags are published as GitHub prereleases.
+annotated tag and main-branch ancestry with git-only checks before running
+repository release code, builds the release binary, builds a local container
+image with `AGENTD_REF` set to the tag, verifies the workspace/binary/container
+identity, extracts release notes from `CHANGELOG.md`, and publishes the GitHub
+Release. Only `vX.Y.Z-rc.N` tags are published as GitHub prereleases.
 
 Manual GitHub Release creation, when needed after a workflow failure, uses the
 same notes source:

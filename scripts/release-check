@@ -73,14 +73,14 @@ workspace_package_names() {
 
 release_from_tag() {
     local tag="$1"
-    [[ "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-rc\.[0-9]+)?$ ]] \
+    [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]] \
         || die "release version must look like vX.Y.Z or vX.Y.Z-rc.N: $tag"
     printf '%s.%s.%s%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"
 }
 
 check_version_shape() {
     local version="$1"
-    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
+    [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]] \
         || die "workspace version must look like X.Y.Z or X.Y.Z-rc.N: $version"
 }
 
@@ -174,6 +174,53 @@ check_containerfile_identity_surface() {
         || die "Containerfile must install the host CLI at /usr/local/bin/agentd"
 }
 
+workflow_tag_patterns() {
+    local workflow="$repo_root/.github/workflows/release.yml"
+
+    awk '
+        $0 == "    tags:" {
+            inside = 1
+            next
+        }
+        inside && $0 ~ /^      - / {
+            value = $0
+            sub(/^      - /, "", value)
+            gsub(/"/, "", value)
+            print value
+            next
+        }
+        inside {
+            exit
+        }
+    ' "$workflow"
+}
+
+check_release_workflow_surface() {
+    local workflow="$repo_root/.github/workflows/release.yml"
+    [[ -f "$workflow" ]] || die ".github/workflows/release.yml not found"
+
+    mapfile -t patterns < <(workflow_tag_patterns)
+    [[ "${#patterns[@]}" == "1" ]] \
+        || die ".github/workflows/release.yml must declare exactly one release tag pattern"
+    [[ "${patterns[0]}" == "v*" ]] \
+        || die ".github/workflows/release.yml tag pattern must delegate v-prefixed tags to release-check validation"
+    ! grep -Eq '^    paths:' "$workflow" \
+        || die ".github/workflows/release.yml tag publication must not use paths filters"
+
+    local validation_line container_setup_line annotated_tag_line main_ancestry_line repository_code_line
+    validation_line="$(awk 'index($0, "./scripts/release-check release \"$GITHUB_REF_NAME\"") { print NR; exit }' "$workflow")"
+    container_setup_line="$(awk '/sudo apt-get install -y podman|podman build/ { print NR; exit }' "$workflow")"
+    [[ -n "$validation_line" ]] && [[ -n "$container_setup_line" ]] && [[ "$validation_line" -lt "$container_setup_line" ]] \
+        || die ".github/workflows/release.yml must validate the release tag before container setup"
+
+    annotated_tag_line="$(awk '/git cat-file -t/ { print NR; exit }' "$workflow")"
+    main_ancestry_line="$(awk '/git merge-base --is-ancestor/ { print NR; exit }' "$workflow")"
+    repository_code_line="$(awk 'index($0, "./scripts/release-check release \"$GITHUB_REF_NAME\"") || /cargo build|podman build/ { print NR; exit }' "$workflow")"
+    [[ -n "$annotated_tag_line" ]] && [[ -n "$main_ancestry_line" ]] && [[ -n "$repository_code_line" ]] \
+        && [[ "$annotated_tag_line" -lt "$repository_code_line" ]] && [[ "$main_ancestry_line" -lt "$repository_code_line" ]] \
+        || die ".github/workflows/release.yml must establish tag trust before running repository code"
+}
+
 check_changelog_structure() {
     local changelog="$repo_root/CHANGELOG.md"
     [[ -f "$changelog" ]] || die "CHANGELOG.md not found"
@@ -193,7 +240,7 @@ check_changelog_structure() {
                 next
             }
 
-            if ($0 !~ /^## \[[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*(-rc\.[0-9][0-9]*)?\] — [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) {
+            if ($0 !~ /^## \[(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?\] — [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) {
                 print "CHANGELOG.md release heading is malformed: " $0 > "/dev/stderr"
                 exit 1
             }
@@ -319,6 +366,7 @@ run_metadata() {
     check_workspace_crates_inherit_version
     check_cargo_lock_versions
     check_containerfile_identity_surface
+    check_release_workflow_surface
     check_changelog_structure
 }
 
