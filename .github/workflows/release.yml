@@ -21,9 +21,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate release tag
-        run: ./scripts/release-check release "$GITHUB_REF_NAME"
-
       - name: Require annotated tag
         run: |
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
@@ -34,6 +31,9 @@ jobs:
           git fetch --force origin refs/heads/main:refs/remotes/origin/main
           tag_commit="$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")"
           git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
 
       - name: Install Rust toolchain
         run: |

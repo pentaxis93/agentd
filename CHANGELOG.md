@@ -44,9 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Release publication now uses a broad `v*` workflow trigger with early
-  `release-check` validation, and release-tag validation now rejects
-  leading-zero numeric identifiers and `rc.0` per the ecosystem SemVer grammar.
+- Release publication now uses a broad `v*` workflow trigger, validates tag
+  trust before running repository release code, and rejects leading-zero
+  numeric identifiers and `rc.0` per the ecosystem SemVer grammar.
 - Release governance checks now cover workflow tag matching behavior, decouple
   tag publication from path-filtered metadata checks, derive release metadata
   validation from workspace members, and use one workspace-version parser across

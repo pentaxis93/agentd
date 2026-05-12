@@ -150,6 +150,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
       - name: Validate release tag
         run: ./scripts/release-check release "$GITHUB_REF_NAME"
 
@@ -524,6 +530,46 @@ jobs:
     let output = fixture.run_release_check(&["metadata"]);
 
     assert_failure_contains(&output, "validate the release tag before container setup");
+}
+
+#[test]
+fn metadata_rejects_release_workflows_that_validate_tags_before_tag_trust() {
+    let fixture = valid_fixture("metadata-workflow-pretrust-validation", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "establish tag trust before running repository code",
+    );
 }
 
 #[test]

@@ -61,6 +61,13 @@ fn line_number_containing(contents: &str, needle: &str) -> Option<usize> {
         .map(|index| index + 1)
 }
 
+fn first_line_number_containing_any(contents: &str, needles: &[&str]) -> Option<usize> {
+    contents
+        .lines()
+        .position(|line| needles.iter().any(|needle| line.contains(needle)))
+        .map(|index| index + 1)
+}
+
 #[test]
 fn workspace_metadata_lists_only_grounded_crates() {
     let output = Command::new("cargo")
@@ -351,6 +358,29 @@ fn github_release_workflow_validates_tags_before_expensive_release_work() {
     assert!(
         validation_line < container_setup_line,
         "release workflow should validate the release tag before container setup"
+    );
+}
+
+#[test]
+fn github_release_workflow_establishes_tag_trust_before_repository_code_execution() {
+    let workflow = read_workspace_file(".github/workflows/release.yml");
+    let annotated_tag_line = line_number_containing(&workflow, "git cat-file -t")
+        .expect("release workflow should require an annotated tag");
+    let main_ancestry_line = line_number_containing(&workflow, "git merge-base --is-ancestor")
+        .expect("release workflow should require the tag target on main");
+    let repository_code_line = first_line_number_containing_any(
+        &workflow,
+        &[
+            "./scripts/release-check release \"$GITHUB_REF_NAME\"",
+            "cargo build",
+            "podman build",
+        ],
+    )
+    .expect("release workflow should run trusted repository release code");
+
+    assert!(
+        annotated_tag_line < repository_code_line && main_ancestry_line < repository_code_line,
+        "release workflow should establish tag trust before running repository code"
     );
 }
 
