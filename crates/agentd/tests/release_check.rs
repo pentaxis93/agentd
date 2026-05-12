@@ -573,6 +573,125 @@ jobs:
 }
 
 #[test]
+fn metadata_ignores_yaml_comments_when_ordering_release_tag_validation() {
+    let fixture = valid_fixture("metadata-workflow-yaml-comment-validation", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      # Note: validate via ./scripts/release-check release "$GITHUB_REF_NAME"
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(&output, "validate the release tag before container setup");
+}
+
+#[test]
+fn metadata_ignores_shell_comments_when_establishing_tag_trust() {
+    let fixture = valid_fixture("metadata-workflow-shell-comment-trust", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Commented annotated tag check
+        run: |
+          # git cat-file -t "refs/tags/$GITHUB_REF_NAME"
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "establish tag trust before running repository code",
+    );
+}
+
+#[test]
+fn metadata_ignores_inline_shell_comments_when_ordering_release_tag_validation() {
+    let fixture = valid_fixture("metadata-workflow-inline-comment-validation", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Commented validation
+        run: true  # ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(&output, "validate the release tag before container setup");
+}
+
+#[test]
 fn notes_emit_the_matching_changelog_section_without_outer_blank_lines() {
     let fixture = valid_fixture("notes-success", "1.2.3");
 
