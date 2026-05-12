@@ -3,8 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"
+      - "v*"
 
 permissions:
   contents: read
@@ -21,6 +20,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
 
       - name: Require annotated tag
         run: |
@@ -68,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           release_flags=()
-          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+[.][0-9]+[.][0-9]+-rc[.][0-9]+$ ]]; then
+          if [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)-rc[.][1-9][0-9]*$ ]]; then
             release_flags+=(--prerelease)
           fi
           gh release create "$GITHUB_REF_NAME" \
