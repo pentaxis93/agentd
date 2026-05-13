@@ -484,7 +484,7 @@ fn transcript_coverage(events: &mut File) -> Result<&'static str, TranscriptFina
     } else if saw_event {
         "missing_mcp_events"
     } else {
-        "outer_streams_only"
+        "no_events"
     };
     Ok(coverage)
 }
@@ -1394,7 +1394,7 @@ mod tests {
                 .expect("transcript manifest should exist"),
         )
         .expect("manifest should be json");
-        assert_eq!(manifest["coverage"], "outer_streams_only");
+        assert_eq!(manifest["coverage"], "no_events");
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
     }
@@ -1808,7 +1808,8 @@ mod tests {
 
     #[test]
     fn transcript_coverage_uses_parsed_event_sources() {
-        assert_eq!(classify_transcript_fixture(""), "outer_streams_only");
+        assert_eq!(classify_transcript_fixture(""), "no_events");
+        assert_eq!(classify_transcript_fixture("\n  \n\t\n"), "no_events");
         assert_eq!(
             classify_transcript_fixture(
                 r#"{"schema_version":1,"source":"runa","kind":"agent_input"}"#

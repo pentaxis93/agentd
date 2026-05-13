@@ -311,7 +311,7 @@ layout:
 - `agentd/transcript/transcript.md` — human-readable rendering of the event
   stream
 - `agentd/transcript/manifest.json` — transcript schema version and coverage:
-  `full`, `missing_mcp_events`, `outer_streams_only`, or `finalization_failed`
+  `full`, `missing_mcp_events`, `no_events`, or `finalization_failed`
 - `agentd/session.json` — agentd-written metadata (`schema_version: 2`,
   `session_id`, `agent`, `repo_url`, optional `work_unit`, timestamps, outcome,
   exit code when applicable) written by atomic temp-file replacement within the
