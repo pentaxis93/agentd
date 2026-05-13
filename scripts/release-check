@@ -272,6 +272,46 @@ workflow_executable_lines() {
     ' "$workflow"
 }
 
+workflow_uses_lines() {
+    local workflow="$1"
+
+    awk '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+
+        function unquote(value) {
+            if ((value ~ /^".*"$/) || (value ~ /^\047.*\047$/)) {
+                return substr(value, 2, length(value) - 2)
+            }
+            return value
+        }
+
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            stripped = trim(line)
+
+            if (stripped ~ /^#/) {
+                next
+            }
+
+            if (line ~ /^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*/) {
+                value = line
+                sub(/^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*/, "", value)
+                value = trim(value)
+                sub(/[[:space:]]+#.*/, "", value)
+                value = trim(value)
+                if (value != "") {
+                    print NR "\t" unquote(value)
+                }
+            }
+        }
+    ' "$workflow"
+}
+
 check_release_workflow_surface() {
     local workflow="$repo_root/.github/workflows/release.yml"
     [[ -f "$workflow" ]] || die ".github/workflows/release.yml not found"
@@ -284,18 +324,21 @@ check_release_workflow_surface() {
     ! grep -Eq '^    paths:' "$workflow" \
         || die ".github/workflows/release.yml tag publication must not use paths filters"
 
-    local validation_line container_setup_line tag_ref_restore_line annotated_tag_line main_ancestry_line repository_code_line
+    local validation_line container_setup_line checkout_line tag_ref_restore_line annotated_tag_line main_ancestry_line repository_code_line
     validation_line="$(workflow_executable_lines "$workflow" | awk -F '\t' 'index($2, "./scripts/release-check release \"$GITHUB_REF_NAME\"") { print $1; exit }')"
     container_setup_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 ~ /sudo apt-get install -y podman|podman build/ { print $1; exit }')"
     [[ -n "$validation_line" ]] && [[ -n "$container_setup_line" ]] && [[ "$validation_line" -lt "$container_setup_line" ]] \
         || die ".github/workflows/release.yml must validate the release tag before container setup"
 
+    checkout_line="$(workflow_uses_lines "$workflow" | awk -F '\t' '$2 ~ /^actions\/checkout(@|$)/ { print $1; exit }')"
     tag_ref_restore_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 == "git fetch --tags --force origin" { print $1; exit }')"
     annotated_tag_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 ~ /git cat-file -t/ { print $1; exit }')"
     main_ancestry_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 ~ /git merge-base --is-ancestor/ { print $1; exit }')"
     repository_code_line="$(workflow_executable_lines "$workflow" | awk -F '\t' 'index($2, "./scripts/") || $2 ~ /cargo build|podman build/ { print $1; exit }')"
     [[ -n "$tag_ref_restore_line" ]] \
         || die ".github/workflows/release.yml must restore annotated tag refs before checking tag type"
+    [[ -n "$checkout_line" ]] && [[ "$checkout_line" -lt "$tag_ref_restore_line" ]] \
+        || die ".github/workflows/release.yml must restore annotated tag refs after checkout and before checking tag type"
     [[ -z "$annotated_tag_line" ]] || [[ "$tag_ref_restore_line" -lt "$annotated_tag_line" ]] \
         || die ".github/workflows/release.yml must restore annotated tag refs before checking tag type"
     [[ -n "$annotated_tag_line" ]] && [[ -n "$main_ancestry_line" ]] && [[ -n "$repository_code_line" ]] \

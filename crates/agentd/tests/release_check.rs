@@ -662,6 +662,49 @@ jobs:
 }
 
 #[test]
+fn metadata_rejects_release_workflows_that_restore_tag_refs_before_checkout() {
+    let fixture = valid_fixture("metadata-workflow-precheckout-tag-ref-restore", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "restore annotated tag refs after checkout and before checking tag type",
+    );
+}
+
+#[test]
 fn metadata_ignores_yaml_comments_when_ordering_release_tag_validation() {
     let fixture = valid_fixture("metadata-workflow-yaml-comment-validation", "1.2.3");
     fixture.write(
