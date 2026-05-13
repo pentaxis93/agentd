@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Empty transcript event streams now report manifest coverage as `no_events`
+  instead of claiming an outer-stream classification not present in
+  `events.jsonl`.
 - Release workflow metadata validation now checks executable `run:` content
   instead of raw workflow text, so YAML and shell comments cannot satisfy
   release ordering or tag-trust invariants.

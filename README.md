@@ -324,7 +324,7 @@ persists on the host under the resolved audit root
 metadata in `agentd/session.json`, and transcript artifacts in
 `agentd/transcript/`. Transcript artifacts include structured JSON Lines events
 at `events.jsonl`, a human-readable `transcript.md`, and `manifest.json` with
-coverage of `full`, `missing_mcp_events`, `outer_streams_only`, or
+coverage of `full`, `missing_mcp_events`, `no_events`, or
 `finalization_failed`. Full MCP tool-call coverage depends on the agent runtime
 launching `runa-mcp`; otherwise the transcript still records the observable runa
 boundary without claiming MCP events that never occurred.
