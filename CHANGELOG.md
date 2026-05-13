@@ -44,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release workflow metadata validation now checks executable `run:` content
+  instead of raw workflow text, so YAML and shell comments cannot satisfy
+  release ordering or tag-trust invariants.
 - Release publication now uses a broad `v*` workflow trigger, validates tag
   trust before running repository release code, and rejects leading-zero
   numeric identifiers and `rc.0` per the ecosystem SemVer grammar.
