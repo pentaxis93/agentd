@@ -364,6 +364,8 @@ fn github_release_workflow_validates_tags_before_expensive_release_work() {
 #[test]
 fn github_release_workflow_establishes_tag_trust_before_repository_code_execution() {
     let workflow = read_workspace_file(".github/workflows/release.yml");
+    let tag_ref_restore_line = line_number_containing(&workflow, "git fetch --tags --force origin")
+        .expect("release workflow should restore annotated tag refs after checkout");
     let annotated_tag_line = line_number_containing(&workflow, "git cat-file -t")
         .expect("release workflow should require an annotated tag");
     let main_ancestry_line = line_number_containing(&workflow, "git merge-base --is-ancestor")
@@ -379,7 +381,9 @@ fn github_release_workflow_establishes_tag_trust_before_repository_code_executio
     .expect("release workflow should run trusted repository release code");
 
     assert!(
-        annotated_tag_line < repository_code_line && main_ancestry_line < repository_code_line,
+        tag_ref_restore_line < annotated_tag_line
+            && annotated_tag_line < repository_code_line
+            && main_ancestry_line < repository_code_line,
         "release workflow should establish tag trust before running repository code"
     );
 }

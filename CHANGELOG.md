@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Fixed
+
+- Release publication now restores annotated tag refs after checkout before
+  tag-trust validation, preserving the annotated-tag security check under
+  `actions/checkout@v4` tag-push behavior. Refs tesserine/commons#34.
 
 ## [0.1.2-rc.2] — 2026-05-13
 ### Added

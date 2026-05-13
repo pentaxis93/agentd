@@ -150,6 +150,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
       - name: Require annotated tag
         run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
 
@@ -553,6 +556,9 @@ jobs:
       - name: Validate release tag
         run: ./scripts/release-check release "$GITHUB_REF_NAME"
 
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
       - name: Require annotated tag
         run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
 
@@ -569,6 +575,89 @@ jobs:
     assert_failure_contains(
         &output,
         "establish tag trust before running repository code",
+    );
+}
+
+#[test]
+fn metadata_rejects_release_workflows_that_do_not_restore_annotated_tag_refs() {
+    let fixture = valid_fixture("metadata-workflow-missing-tag-ref-restore", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "restore annotated tag refs before checking tag type",
+    );
+}
+
+#[test]
+fn metadata_rejects_release_workflows_that_restore_tag_refs_after_checking_tag_type() {
+    let fixture = valid_fixture("metadata-workflow-late-tag-ref-restore", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "restore annotated tag refs before checking tag type",
     );
 }
 
@@ -627,6 +716,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
 
       - name: Commented annotated tag check
         run: |

@@ -21,6 +21,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
       - name: Require annotated tag
         run: |
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
