@@ -1039,6 +1039,106 @@ fn release_rejects_tag_versions_that_do_not_match_workspace_version() {
 }
 
 #[test]
+fn release_rejects_empty_artifact_validation_values() {
+    let fixture = valid_fixture("release-empty-artifact-values", "1.2.3");
+
+    let output = fixture.run_release_check(&[
+        "release",
+        "v1.2.3",
+        "--agentd-bin",
+        "",
+        "--container-image",
+        "",
+    ]);
+
+    assert_failure_contains(&output, "--agentd-bin requires a non-empty path");
+}
+
+#[test]
+fn release_rejects_empty_agentd_binary_path_even_with_container_image() {
+    let fixture = valid_fixture("release-empty-agentd-bin", "1.2.3");
+    fixture.write(
+        "fake-runtime",
+        r#"#!/usr/bin/env sh
+set -eu
+case "$1" in
+  inspect)
+    printf 'v1.2.3\n'
+    ;;
+  create)
+    printf 'fake-container\n'
+    ;;
+  cp)
+    destination="$3"
+    cat >"$destination" <<'EOF'
+#!/usr/bin/env sh
+printf 'agentd 1.2.3\n'
+EOF
+    chmod +x "$destination"
+    ;;
+  rm)
+    exit 0
+    ;;
+  *)
+    echo "unexpected fake-runtime command: $*" >&2
+    exit 64
+    ;;
+esac
+"#,
+    );
+    fs::set_permissions(
+        fixture.root.join("fake-runtime"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("fake runtime should be executable");
+
+    let output = Command::new("bash")
+        .arg(fixture.root.join("scripts/release-check"))
+        .args([
+            "release",
+            "v1.2.3",
+            "--agentd-bin",
+            "",
+            "--container-image",
+            "localhost/agentd:v1.2.3",
+        ])
+        .current_dir(&fixture.root)
+        .env(
+            "AGENTD_CONTAINER_RUNTIME",
+            fixture.root.join("fake-runtime"),
+        )
+        .output()
+        .expect("release-check should run");
+
+    assert_failure_contains(&output, "--agentd-bin requires a non-empty path");
+}
+
+#[test]
+fn release_rejects_empty_container_image_even_with_agentd_binary_path() {
+    let fixture = valid_fixture("release-empty-container-image", "1.2.3");
+    fixture.write(
+        "fake-agentd",
+        "#!/usr/bin/env sh\nprintf 'agentd 1.2.3\\n'\n",
+    );
+    fs::set_permissions(
+        fixture.root.join("fake-agentd"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("fake binary should be executable");
+
+    let output = fixture.run_release_check(&[
+        "release",
+        "v1.2.3",
+        "--agentd-bin",
+        "fake-agentd",
+        "--container-image",
+        "",
+    ]);
+
+    assert_failure_contains(&output, "--container-image requires a non-empty image");
+}
+
+#[test]
 fn release_checks_agentd_binary_identity_when_a_binary_is_supplied() {
     let fixture = valid_fixture("release-binary-success", "1.2.3");
     fixture.write(
