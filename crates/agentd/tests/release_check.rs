@@ -153,6 +153,14 @@ jobs:
       - name: Restore annotated tag refs
         run: git fetch --tags --force origin
 
+      - name: Verify restored tag matches event
+        run: |
+          restored_commit=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")
+          if [ "$restored_commit" != "$GITHUB_SHA" ]; then
+            echo "Tag $GITHUB_REF_NAME moved since trigger: expected $GITHUB_SHA, got $restored_commit" >&2
+            exit 1
+          fi
+
       - name: Require annotated tag
         run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
 
@@ -559,6 +567,14 @@ jobs:
       - name: Restore annotated tag refs
         run: git fetch --tags --force origin
 
+      - name: Verify restored tag matches event
+        run: |
+          restored_commit=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")
+          if [ "$restored_commit" != "$GITHUB_SHA" ]; then
+            echo "Tag $GITHUB_REF_NAME moved since trigger: expected $GITHUB_SHA, got $restored_commit" >&2
+            exit 1
+          fi
+
       - name: Require annotated tag
         run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
 
@@ -575,6 +591,100 @@ jobs:
     assert_failure_contains(
         &output,
         "establish tag trust before running repository code",
+    );
+}
+
+#[test]
+fn metadata_rejects_release_workflows_that_do_not_verify_restored_tag_matches_event() {
+    let fixture = valid_fixture("metadata-workflow-missing-event-identity", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "verify the restored tag matches the triggering event before checking tag type",
+    );
+}
+
+#[test]
+fn metadata_rejects_release_workflows_that_verify_event_identity_before_restoring_tag_refs() {
+    let fixture = valid_fixture("metadata-workflow-early-event-identity", "1.2.3");
+    fixture.write(
+        ".github/workflows/release.yml",
+        r#"name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify restored tag matches event
+        run: |
+          restored_commit=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")
+          if [ "$restored_commit" != "$GITHUB_SHA" ]; then
+            echo "Tag $GITHUB_REF_NAME moved since trigger: expected $GITHUB_SHA, got $restored_commit" >&2
+            exit 1
+          fi
+
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
+      - name: Require annotated tag
+        run: test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+
+      - name: Require tag target on main
+        run: git merge-base --is-ancestor "$tag_commit" refs/remotes/origin/main
+
+      - name: Validate release tag
+        run: ./scripts/release-check release "$GITHUB_REF_NAME"
+
+      - name: Install container tooling
+        run: sudo apt-get install -y podman
+"#,
+    );
+
+    let output = fixture.run_release_check(&["metadata"]);
+
+    assert_failure_contains(
+        &output,
+        "verify the restored tag matches the triggering event before checking tag type",
     );
 }
 
@@ -762,6 +872,14 @@ jobs:
 
       - name: Restore annotated tag refs
         run: git fetch --tags --force origin
+
+      - name: Verify restored tag matches event
+        run: |
+          restored_commit=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")
+          if [ "$restored_commit" != "$GITHUB_SHA" ]; then
+            echo "Tag $GITHUB_REF_NAME moved since trigger: expected $GITHUB_SHA, got $restored_commit" >&2
+            exit 1
+          fi
 
       - name: Commented annotated tag check
         run: |

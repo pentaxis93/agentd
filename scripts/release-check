@@ -324,7 +324,7 @@ check_release_workflow_surface() {
     ! grep -Eq '^    paths:' "$workflow" \
         || die ".github/workflows/release.yml tag publication must not use paths filters"
 
-    local validation_line container_setup_line checkout_line tag_ref_restore_line annotated_tag_line main_ancestry_line repository_code_line
+    local validation_line container_setup_line checkout_line tag_ref_restore_line event_identity_verify_line annotated_tag_line main_ancestry_line repository_code_line
     validation_line="$(workflow_executable_lines "$workflow" | awk -F '\t' 'index($2, "./scripts/release-check release \"$GITHUB_REF_NAME\"") { print $1; exit }')"
     container_setup_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 ~ /sudo apt-get install -y podman|podman build/ { print $1; exit }')"
     [[ -n "$validation_line" ]] && [[ -n "$container_setup_line" ]] && [[ "$validation_line" -lt "$container_setup_line" ]] \
@@ -332,6 +332,16 @@ check_release_workflow_surface() {
 
     checkout_line="$(workflow_uses_lines "$workflow" | awk -F '\t' '$2 ~ /^actions\/checkout(@|$)/ { print $1; exit }')"
     tag_ref_restore_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 == "git fetch --tags --force origin" { print $1; exit }')"
+    event_identity_verify_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '
+        $2 == "restored_commit=$(git rev-parse \"refs/tags/$GITHUB_REF_NAME^{commit}\")" {
+            saw_restored_commit = 1
+            next
+        }
+        saw_restored_commit && $2 == "if [ \"$restored_commit\" != \"$GITHUB_SHA\" ]; then" {
+            print $1
+            exit
+        }
+    ')"
     annotated_tag_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 ~ /git cat-file -t/ { print $1; exit }')"
     main_ancestry_line="$(workflow_executable_lines "$workflow" | awk -F '\t' '$2 ~ /git merge-base --is-ancestor/ { print $1; exit }')"
     repository_code_line="$(workflow_executable_lines "$workflow" | awk -F '\t' 'index($2, "./scripts/") || $2 ~ /cargo build|podman build/ { print $1; exit }')"
@@ -341,6 +351,9 @@ check_release_workflow_surface() {
         || die ".github/workflows/release.yml must restore annotated tag refs after checkout and before checking tag type"
     [[ -z "$annotated_tag_line" ]] || [[ "$tag_ref_restore_line" -lt "$annotated_tag_line" ]] \
         || die ".github/workflows/release.yml must restore annotated tag refs before checking tag type"
+    [[ -n "$event_identity_verify_line" ]] && [[ "$tag_ref_restore_line" -lt "$event_identity_verify_line" ]] \
+        && { [[ -z "$annotated_tag_line" ]] || [[ "$event_identity_verify_line" -lt "$annotated_tag_line" ]]; } \
+        || die ".github/workflows/release.yml must verify the restored tag matches the triggering event before checking tag type"
     [[ -n "$annotated_tag_line" ]] && [[ -n "$main_ancestry_line" ]] && [[ -n "$repository_code_line" ]] \
         && [[ "$annotated_tag_line" -lt "$repository_code_line" ]] && [[ "$main_ancestry_line" -lt "$repository_code_line" ]] \
         || die ".github/workflows/release.yml must establish tag trust before running repository code"
