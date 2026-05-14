@@ -78,12 +78,14 @@ the existing tag.
 
 ## Post-Release Gate
 
-The tag push runs `.github/workflows/release.yml`. That workflow verifies the
-annotated tag and main-branch ancestry with git-only checks before running
-repository release code, builds the release binary, builds a local container
-image with `AGENTD_REF` set to the tag, verifies the workspace/binary/container
-identity, extracts release notes from `CHANGELOG.md`, and publishes the GitHub
-Release. Only `vX.Y.Z-rc.N` tags are published as GitHub prereleases.
+The tag push runs `.github/workflows/release.yml`. That workflow restores the
+tag ref, verifies that its commit still matches the event commit, and verifies
+the annotated tag and main-branch ancestry with git-only checks before running
+repository release code. It then builds the release binary, builds a local
+container image with `AGENTD_REF` set to the tag, verifies the
+workspace/binary/container identity, extracts release notes from `CHANGELOG.md`,
+and publishes the GitHub Release.
+Only `vX.Y.Z-rc.N` tags are published as GitHub prereleases.
 
 Manual GitHub Release creation, when needed after a workflow failure, uses the
 same notes source:

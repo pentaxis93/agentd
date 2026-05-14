@@ -21,6 +21,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Restore annotated tag refs
+        run: git fetch --tags --force origin
+
+      - name: Verify restored tag matches event
+        run: |
+          set -euo pipefail
+          restored_commit=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")
+          if [ "$restored_commit" != "$GITHUB_SHA" ]; then
+            echo "Tag $GITHUB_REF_NAME moved since trigger: expected $GITHUB_SHA, got $restored_commit" >&2
+            exit 1
+          fi
+
       - name: Require annotated tag
         run: |
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
