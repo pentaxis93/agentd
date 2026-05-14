@@ -519,11 +519,13 @@ run_release() {
         case "$1" in
             --agentd-bin)
                 [[ "$#" -ge 2 ]] || die "--agentd-bin requires a path"
+                [[ -n "$2" ]] || die "--agentd-bin requires a non-empty path"
                 agentd_bin="$2"
                 shift 2
                 ;;
             --container-image)
                 [[ "$#" -ge 2 ]] || die "--container-image requires an image"
+                [[ -n "$2" ]] || die "--container-image requires a non-empty image"
                 container_image="$2"
                 shift 2
                 ;;
