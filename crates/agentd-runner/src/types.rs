@@ -103,9 +103,9 @@ pub enum InvocationInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInvocation {
     /// Remote repository URL cloned into the container workspace. Must use
-    /// `https://`, `http://`, or `git://` scheme. Credential-bearing URLs
-    /// are rejected. When [`Self::repo_token`] is present, this must use
-    /// `https://`.
+    /// `https://`, `http://`, `git://`, `ssh://`, or `user@host:path` form.
+    /// Credential-bearing URLs are rejected. When [`Self::repo_token`] is
+    /// present, this must use `https://`.
     pub repo_url: String,
     /// Optional bearer token used only for the runner-managed `git clone`
     /// request for `https://` repository URLs. This token is not passed

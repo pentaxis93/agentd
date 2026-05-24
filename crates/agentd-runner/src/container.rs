@@ -18,7 +18,8 @@ use crate::session_paths::{
 };
 use crate::types::{BindMount, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{
-    REPO_TOKEN_ENV, TRANSCRIPT_DIR_ENV, TRANSCRIPT_REDACT_ENV, runner_managed_environment,
+    REPO_TOKEN_ENV, RepoUrlKind, TRANSCRIPT_DIR_ENV, TRANSCRIPT_REDACT_ENV, repo_url_kind,
+    runner_managed_environment,
 };
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -200,7 +201,12 @@ fn build_container_script(
     script.push_str("\nrm -rf ");
     script.push_str(&shell_quote(&repo_dir));
     script.push('\n');
-    script.push_str(&build_clone_command(invocation, &repo_dir));
+    script.push_str(&build_clone_command(
+        invocation,
+        &repo_dir,
+        &home_dir,
+        &user_group,
+    ));
     script.push_str("\ncd ");
     script.push_str(&shell_quote(&repo_dir));
     script.push_str("\nchown -R ");
@@ -313,8 +319,25 @@ fn home_descendant_mount_target(home_dir: &Path, mount_target: &Path) -> Option<
     Some(mount_target.display().to_string())
 }
 
-fn build_clone_command(invocation: &SessionInvocation, repo_dir: &str) -> String {
+fn build_clone_command(
+    invocation: &SessionInvocation,
+    repo_dir: &str,
+    home_dir: &str,
+    user_group: &str,
+) -> String {
     let mut command = String::new();
+
+    if repo_url_kind(&invocation.repo_url) == RepoUrlKind::Ssh {
+        command.push_str("GIT_TERMINAL_PROMPT=0 HOME=");
+        command.push_str(&shell_quote(home_dir));
+        command.push_str(" gosu ");
+        command.push_str(&shell_quote(user_group));
+        command.push_str(" git clone --no-hardlinks -- ");
+        command.push_str(&shell_quote(&invocation.repo_url));
+        command.push(' ');
+        command.push_str(&shell_quote(repo_dir));
+        return command;
+    }
 
     if invocation.repo_token.is_some() {
         command.push_str("repo_token=${");
