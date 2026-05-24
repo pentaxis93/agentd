@@ -578,6 +578,7 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
         "host data should remain untouched\n",
     )
     .expect("read-only host sentinel file should be written");
+    relabel_container_mount_source_if_possible(&host_mount);
 
     let outcome = run_session_with_test_audit_root(
         &fixture.audit_root(),
@@ -646,6 +647,7 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
         fs::metadata(host_mount.join("sentinel.txt")).expect("sentinel metadata should exist");
     fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
         .expect("read-write host mount should permit container writes");
+    relabel_container_mount_source_if_possible(&host_mount);
 
     let outcome = run_session_with_test_audit_root(
         &fixture.audit_root(),
@@ -718,6 +720,7 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
     fs::create_dir_all(&host_mount).expect("nested host mount should be created");
     fs::set_permissions(&host_mount, fs::Permissions::from_mode(0o777))
         .expect("nested host mount should permit container writes");
+    relabel_container_mount_source_if_possible(&host_mount);
 
     let outcome = run_session_with_test_audit_root(
         &fixture.audit_root(),
@@ -1209,6 +1212,7 @@ fn refuses_hard_linked_audit_entries_without_mutating_operator_mount_file_modes(
     fs::write(&operator_file, "operator managed\n").expect("operator file should be written");
     fs::set_permissions(&operator_file, fs::Permissions::from_mode(0o666))
         .expect("operator file should be writable");
+    relabel_container_mount_source_if_possible(&host_mount);
 
     let audit_root = fixture.audit_root();
     let helper_audit_root = audit_root.clone();
@@ -1467,6 +1471,94 @@ fn releases_session_secret_after_container_reaches_running_state() {
     fixture.assert_no_runner_secret_left_behind();
 }
 
+#[test]
+fn clones_ssh_repo_with_agent_scoped_mounted_identity() {
+    if skip_if_podman_unavailable("clones_ssh_repo_with_agent_scoped_mounted_identity") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("ssh-clone-run");
+    let ssh_server = SshGitServer::start(&fixture);
+    let ssh_dir = fixture.create_ssh_client_dir(ssh_server.port());
+    let image = fixture.build_image_with_ssh_client();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            agent_name: "ssh-clone-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: vec![BindMount {
+                source: ssh_dir,
+                target: PathBuf::from("/home/ssh-clone-run/.ssh"),
+                read_only: true,
+            }],
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "success-without-work-unit".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: ssh_server.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn ssh_repo_clone_cannot_use_another_agents_unmounted_identity() {
+    if skip_if_podman_unavailable("ssh_repo_clone_cannot_use_another_agents_unmounted_identity") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("ssh-no-identity-run");
+    let ssh_server = SshGitServer::start(&fixture);
+    let image = fixture.build_image_with_ssh_client();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            agent_name: "ssh-no-identity-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            mounts: Vec::new(),
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: Vec::new(),
+        },
+        SessionInvocation {
+            repo_url: ssh_server.repo_url(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+    )
+    .expect("session should run");
+
+    assert_ne!(outcome, SessionOutcome::Success { exit_code: 0 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
 struct SessionFixture {
     root: PathBuf,
     agent_name: String,
@@ -1542,8 +1634,71 @@ impl SessionFixture {
         )
     }
 
+    fn bare_repo_dir(&self) -> PathBuf {
+        self.root.join("repo-server/repo.git")
+    }
+
+    fn create_ssh_client_dir(&self, ssh_port: u16) -> PathBuf {
+        let ssh_dir = self.root.join("ssh-client");
+        fs::create_dir_all(&ssh_dir).expect("ssh client dir should be created");
+        fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o755))
+            .expect("ssh client dir should be traversable by the session user");
+        write_file_with_mode(
+            &ssh_dir.join("id_ed25519"),
+            TEST_SSH_CLIENT_PRIVATE_KEY,
+            0o600,
+        );
+        write_file_with_mode(
+            &ssh_dir.join("known_hosts"),
+            &format!("[host.containers.internal]:{ssh_port} {TEST_SSH_HOST_PUBLIC_KEY}\n"),
+            0o644,
+        );
+        write_file_with_mode(
+            &ssh_dir.join("config"),
+            "Host *\n    IdentityFile ~/.ssh/id_ed25519\n    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n    UserKnownHostsFile ~/.ssh/known_hosts\n",
+            0o600,
+        );
+        relabel_container_mount_source_if_possible(&ssh_dir);
+        ssh_dir
+    }
+
     fn build_image(&self) -> String {
         self.build_image_with_agentd_work_unit_line(None)
+    }
+
+    fn build_image_with_ssh_client(&self) -> String {
+        self.build_image_with_customizations(
+            None,
+            "RUN apt-get update \\\n    && apt-get install -y --no-install-recommends openssh-client \\\n    && rm -rf /var/lib/apt/lists/*\n",
+        )
+    }
+
+    fn build_ssh_server_image(&self) -> String {
+        let context_dir = self.root.join("ssh-server-image-context");
+        fs::create_dir_all(&context_dir).expect("ssh server image context should be created");
+        write_file_with_mode(
+            &context_dir.join("ssh_host_ed25519_key"),
+            TEST_SSH_HOST_PRIVATE_KEY,
+            0o600,
+        );
+        write_file_with_mode(
+            &context_dir.join("authorized_keys"),
+            TEST_SSH_CLIENT_PUBLIC_KEY,
+            0o644,
+        );
+        fs::write(context_dir.join("Containerfile"), SSH_SERVER_CONTAINERFILE)
+            .expect("ssh server containerfile should be written");
+
+        let tag = format!("agentd-runner-ssh-server-test:{}", self.agent_name);
+        let status = Command::new("podman")
+            .args(["build", "--tag", &tag, context_dir.to_str().unwrap()])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .expect("podman ssh server build should start");
+
+        assert!(status.success(), "podman ssh server build failed");
+        tag
     }
 
     fn build_image_with_preexisting_home_file(&self) -> String {
@@ -1696,6 +1851,118 @@ impl Drop for SessionFixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+struct SshGitServer {
+    container_name: String,
+    port: u16,
+}
+
+impl SshGitServer {
+    fn start(fixture: &SessionFixture) -> Self {
+        let image = fixture.build_ssh_server_image();
+        let container_name = format!("agentd-runner-ssh-server-{}", fixture.agent_name);
+        let status = Command::new("podman")
+            .args([
+                "run",
+                "--detach",
+                "--name",
+                &container_name,
+                "--publish",
+                "0.0.0.0::22",
+                "--volume",
+                &format!(
+                    "{}:/srv/git/repo.git:ro,Z",
+                    fixture.bare_repo_dir().display()
+                ),
+                &image,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .expect("podman run ssh server should start");
+        assert!(status.success(), "podman ssh server run failed");
+
+        let server = Self {
+            container_name,
+            port: podman_container_port(&fixture.agent_name, 22),
+        };
+        server.wait_until_ready();
+        server
+    }
+
+    fn repo_url(&self) -> String {
+        format!(
+            "ssh://git@host.containers.internal:{}/srv/git/repo.git",
+            self.port
+        )
+    }
+
+    fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn wait_until_ready(&self) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let status = Command::new("podman")
+                .args([
+                    "exec",
+                    &self.container_name,
+                    "sh",
+                    "-c",
+                    "test -s /run/sshd.pid",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("podman exec ssh readiness probe should run");
+            if status.success() {
+                return;
+            }
+
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for ssh git server {}",
+                self.container_name
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+impl Drop for SshGitServer {
+    fn drop(&mut self) {
+        let _ = Command::new("podman")
+            .args(["rm", "--force", "--ignore", &self.container_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+fn podman_container_port(agent_name: &str, container_port: u16) -> u16 {
+    let container_name = format!("agentd-runner-ssh-server-{agent_name}");
+    let output = Command::new("podman")
+        .args(["port", &container_name, &format!("{container_port}/tcp")])
+        .output()
+        .expect("podman port should run");
+    assert!(
+        output.status.success(),
+        "podman port failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("podman port output should be utf-8");
+    let endpoint = stdout
+        .lines()
+        .next()
+        .expect("podman port should report an endpoint")
+        .trim();
+    endpoint
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("podman port output should end with a port: {endpoint}"))
 }
 
 fn skip_if_podman_unavailable(test_name: &str) -> bool {
@@ -1885,6 +2152,42 @@ fn write_test_repo(destination: &Path) {
     run_git_in(destination, ["update-server-info"]);
 }
 
+fn write_file_with_mode(path: &Path, contents: &str, mode: u32) {
+    fs::write(path, contents).unwrap_or_else(|error| {
+        panic!("failed to write {}: {error}", path.display());
+    });
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap_or_else(|error| {
+        panic!("failed to set permissions on {}: {error}", path.display());
+    });
+}
+
+fn relabel_container_mount_source_if_possible(path: &Path) {
+    let Ok(status) = Command::new("chcon")
+        .args(["-R", "-t", "container_file_t", path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    else {
+        return;
+    };
+    if status.success() || selinux_is_not_enforcing() {
+        return;
+    }
+
+    panic!(
+        "failed to label {} as container_file_t for Podman bind mount access",
+        path.display()
+    );
+}
+
+fn selinux_is_not_enforcing() -> bool {
+    Command::new("getenforce")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_none_or(|state| state.trim() != "Enforcing")
+}
+
 fn run_git<const N: usize>(directory: &Path, args: [&str; N]) {
     run_git_in(directory, args);
 }
@@ -1917,6 +2220,47 @@ COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /usr/local/bin/site-builder /usr/local/bin/runa /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 "#;
+
+const SSH_SERVER_CONTAINERFILE: &str = r#"
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/sh git \
+    && mkdir -p /run/sshd /home/git/.ssh \
+    && git config --system --add safe.directory /srv/git/repo.git
+COPY ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
+COPY authorized_keys /home/git/.ssh/authorized_keys
+RUN chown root:root /etc/ssh/ssh_host_ed25519_key \
+    && chmod 600 /etc/ssh/ssh_host_ed25519_key \
+    && chown -R git:git /home/git/.ssh \
+    && chmod 700 /home/git/.ssh \
+    && chmod 600 /home/git/.ssh/authorized_keys
+CMD ["/usr/sbin/sshd", "-D", "-e", "-p", "22", "-o", "HostKey=/etc/ssh/ssh_host_ed25519_key", "-o", "PasswordAuthentication=no", "-o", "PermitRootLogin=no", "-o", "PubkeyAuthentication=yes", "-o", "StrictModes=no"]
+"#;
+
+const TEST_SSH_CLIENT_PRIVATE_KEY: &str = r#"-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACChQZdJT2G6+ueG6I+nHXf6ZtsyYna9psMKOwB7qx0N1QAAAJhVmstGVZrL
+RgAAAAtzc2gtZWQyNTUxOQAAACChQZdJT2G6+ueG6I+nHXf6ZtsyYna9psMKOwB7qx0N1Q
+AAAEAE/pe0Mhtfy8QujE6l8Vyh7VHGxB7si8JkLhLMi+fp7aFBl0lPYbr654boj6cdd/pm
+2zJidr2mwwo7AHurHQ3VAAAAEmFnZW50ZC10ZXN0LWNsaWVudAECAw==
+-----END OPENSSH PRIVATE KEY-----
+"#;
+
+const TEST_SSH_CLIENT_PUBLIC_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKFBl0lPYbr654boj6cdd/pm2zJidr2mwwo7AHurHQ3V agentd-test-client\n";
+
+const TEST_SSH_HOST_PRIVATE_KEY: &str = r#"-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDfgtH3MwyDyxDt+nGAh5+ype2n1R9qlQlx6b1LZct4ugAAAJhmHI3OZhyN
+zgAAAAtzc2gtZWQyNTUxOQAAACDfgtH3MwyDyxDt+nGAh5+ype2n1R9qlQlx6b1LZct4ug
+AAAEAm3lPHtt2jzYTHKaXkmLdcuaj+Q5fIMlw04LocpTcmk9+C0fczDIPLEO36cYCHn7Kl
+7afVH2qVCXHpvUtly3i6AAAAEGFnZW50ZC10ZXN0LWhvc3QBAgMEBQ==
+-----END OPENSSH PRIVATE KEY-----
+"#;
+
+const TEST_SSH_HOST_PUBLIC_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN+C0fczDIPLEO36cYCHn7Kl7afVH2qVCXHpvUtly3i6 agentd-test-host";
 
 const ENTRYPOINT_SH: &str = r#"#!/bin/sh
 set -eu

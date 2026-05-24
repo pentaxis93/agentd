@@ -22,8 +22,7 @@ pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 pub(crate) const TRANSCRIPT_DIR_ENV: &str = "RUNA_TRANSCRIPT_DIR";
 pub(crate) const TRANSCRIPT_REDACT_ENV: &str = "RUNA_TRANSCRIPT_REDACT_ENV";
 const RESERVED_AGENT_NAMES: [&str; 7] = ["root", "nobody", "daemon", "bin", "sys", "man", "mail"];
-const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, or git://";
-const SUPPORTED_REPO_URL_PREFIXES: [&str; 3] = ["https://", "http://", "git://"];
+const SUPPORTED_REPO_URL_FORMS: &str = "https://, http://, git://, ssh://, or user@host:path";
 const METHODOLOGY_MOUNT_PATH: &str = "/agentd/methodology";
 const TRANSCRIPT_MOUNT_PATH: &str = "/agentd/transcript";
 
@@ -149,7 +148,8 @@ pub fn validate_mount_overlap(mounts: &[BindMount]) -> Result<(), MountOverlapEr
 pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), RunnerError> {
     validate_repo_url(&invocation.repo_url)?;
 
-    if invocation.repo_token.is_some() && !invocation.repo_url.starts_with("https://") {
+    if invocation.repo_token.is_some() && repo_url_kind(&invocation.repo_url) != RepoUrlKind::Https
+    {
         return Err(repo_token_requires_https_error());
     }
     if invocation.work_unit.is_some() && invocation.input.is_some() {
@@ -200,19 +200,20 @@ pub fn validate_agent_name(name: &str) -> Result<(), AgentNameValidationError> {
 
 /// Validates a remote repository URL against the runner's supported forms.
 ///
-/// Accepts only trimmed `https://`, `http://`, and `git://` remote URLs with a
-/// non-empty authority and path. Credential-bearing URLs and URLs with query or
-/// fragment components are rejected.
+/// Accepts only trimmed `https://`, `http://`, `git://`, `ssh://`, and
+/// `user@host:path` remote URLs with a non-empty authority and path.
+/// Credential-bearing URLs and URLs with query or fragment components are
+/// rejected.
 pub fn validate_repo_url(repo_url: &str) -> Result<(), RunnerError> {
     if repo_url.trim().is_empty() || repo_url != repo_url.trim() {
         return Err(unsupported_repo_url_error());
     }
 
-    if has_repo_url_userinfo(repo_url) {
+    if is_credential_bearing_repo_url(repo_url) {
         return Err(credential_bearing_repo_url_error());
     }
 
-    if !is_supported_repo_url(repo_url) {
+    if repo_url_kind(repo_url) == RepoUrlKind::Unsupported {
         return Err(unsupported_repo_url_error());
     }
 
@@ -227,29 +228,60 @@ pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1
     [(AGENT_NAME_ENV, &spec.agent_name)]
 }
 
-fn is_supported_repo_url(repo_url: &str) -> bool {
-    if repo_url.contains(['?', '#']) {
-        return false;
-    }
-
-    repo_url_authority(repo_url)
-        .zip(repo_url_path(repo_url))
-        .map(|(authority, path)| {
-            !authority.is_empty()
-                && !authority.starts_with('/')
-                && path.starts_with('/')
-                && path.len() > 1
-                && SUPPORTED_REPO_URL_PREFIXES
-                    .iter()
-                    .any(|prefix| repo_url.starts_with(prefix))
-        })
-        .unwrap_or(false)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepoUrlKind {
+    Https,
+    OtherPlainGit,
+    Ssh,
+    Unsupported,
 }
 
-fn has_repo_url_userinfo(repo_url: &str) -> bool {
-    repo_url_authority(repo_url)
-        .map(|authority| authority.contains('@'))
-        .unwrap_or(false)
+pub(crate) fn repo_url_kind(repo_url: &str) -> RepoUrlKind {
+    if repo_url.contains(['?', '#']) {
+        return RepoUrlKind::Unsupported;
+    }
+
+    if is_supported_scp_like_ssh_repo_url(repo_url) {
+        return RepoUrlKind::Ssh;
+    }
+
+    let Some(scheme) = repo_url_scheme(repo_url) else {
+        return RepoUrlKind::Unsupported;
+    };
+    let Some((authority, path)) = repo_url_authority(repo_url).zip(repo_url_path(repo_url)) else {
+        return RepoUrlKind::Unsupported;
+    };
+
+    let supported_authority_and_path = !authority.is_empty()
+        && !authority.starts_with('/')
+        && path.starts_with('/')
+        && path.len() > 1;
+    if !supported_authority_and_path {
+        return RepoUrlKind::Unsupported;
+    }
+
+    match scheme {
+        "https" => RepoUrlKind::Https,
+        "http" | "git" => RepoUrlKind::OtherPlainGit,
+        "ssh" if is_supported_ssh_authority(authority) => RepoUrlKind::Ssh,
+        _ => RepoUrlKind::Unsupported,
+    }
+}
+
+fn is_credential_bearing_repo_url(repo_url: &str) -> bool {
+    if let Some(authority) = repo_url_authority(repo_url) {
+        if repo_url_scheme(repo_url) == Some("ssh") {
+            return ssh_authority_user(authority).is_some_and(|user| user.contains(':'));
+        }
+
+        return authority.contains('@');
+    }
+
+    scp_like_ssh_user(repo_url).is_some_and(|user| user.contains(':'))
+}
+
+fn repo_url_scheme(repo_url: &str) -> Option<&str> {
+    repo_url.get(..repo_url.find("://")?)
 }
 
 fn repo_url_authority(repo_url: &str) -> Option<&str> {
@@ -264,6 +296,49 @@ fn repo_url_path(repo_url: &str) -> Option<&str> {
     let remainder = repo_url.get(scheme_end + 3..)?;
     let path_start = remainder.find('/')?;
     remainder.get(path_start..)
+}
+
+fn is_supported_ssh_authority(authority: &str) -> bool {
+    let host_port = match authority.rsplit_once('@') {
+        Some((user, host_port)) if !user.is_empty() && !user.contains(':') => host_port,
+        Some(_) => return false,
+        None => authority,
+    };
+
+    let host = host_port
+        .rsplit_once(':')
+        .map(|(host, port)| {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return "";
+            }
+            host
+        })
+        .unwrap_or(host_port);
+
+    !host.is_empty()
+}
+
+fn is_supported_scp_like_ssh_repo_url(repo_url: &str) -> bool {
+    let Some((user_host, path)) = repo_url.rsplit_once(':') else {
+        return false;
+    };
+    if path.is_empty() || user_host.contains("://") {
+        return false;
+    }
+    let Some((user, host)) = user_host.rsplit_once('@') else {
+        return false;
+    };
+
+    !user.is_empty() && !user.contains(':') && !host.is_empty()
+}
+
+fn ssh_authority_user(authority: &str) -> Option<&str> {
+    authority.rsplit_once('@').map(|(user, _)| user)
+}
+
+fn scp_like_ssh_user(repo_url: &str) -> Option<&str> {
+    let (user_host, _) = repo_url.rsplit_once(':')?;
+    user_host.rsplit_once('@').map(|(user, _)| user)
 }
 
 fn unsupported_repo_url_error() -> RunnerError {
@@ -1196,6 +1271,10 @@ mod tests {
             "http://example.com/agentd.git/",
             "git://example.com/agentd.git",
             "git://example.com/agentd.git/",
+            "ssh://git@example.com/agentd.git",
+            "ssh://git@example.com:2222/tesserine/agentd.git",
+            "git@example.com:tesserine/agentd.git",
+            "git@example.com:/srv/git/agentd.git",
         ] {
             validate_invocation(&SessionInvocation {
                 repo_url: repo_url.to_string(),
@@ -1230,6 +1309,8 @@ mod tests {
         for repo_url in [
             "http://example.com/private-agentd.git",
             "git://example.com/private-agentd.git",
+            "ssh://git@example.com/private-agentd.git",
+            "git@example.com:private-agentd.git",
         ] {
             let error = validate_invocation(&SessionInvocation {
                 repo_url: repo_url.to_string(),
@@ -1266,8 +1347,6 @@ mod tests {
             "file:///srv/test-repo.git",
             "ftp://example.com/agentd.git",
             "gopher://example.com/agentd.git",
-            "ssh://git@example.com/agentd.git",
-            "git@example.com:agentd.git",
             "https://user:token@example.com/repo.git",
             "https://",
             "http://",
@@ -1282,6 +1361,9 @@ mod tests {
             "git@example.com",
             "@example.com:agentd.git",
             "git@:agentd.git",
+            "ssh://git@example.com",
+            "ssh://git@example.com/repo.git?token=secret",
+            "ssh://git@example.com/repo.git#readme",
         ] {
             let error = validate_invocation(&SessionInvocation {
                 repo_url: repo_url.to_string(),
@@ -1301,24 +1383,30 @@ mod tests {
 
     #[test]
     fn validate_invocation_rejects_credential_bearing_repo_urls() {
-        let error = validate_invocation(&SessionInvocation {
-            repo_url: "https://user:token@example.com/repo.git".to_string(),
-            repo_token: None,
-            work_unit: None,
-            input: None,
-            timeout: None,
-        })
-        .expect_err("credential-bearing repo URLs should be rejected");
+        for repo_url in [
+            "https://user:token@example.com/repo.git",
+            "ssh://git:token@example.com/repo.git",
+            "git:token@example.com:repo.git",
+        ] {
+            let error = validate_invocation(&SessionInvocation {
+                repo_url: repo_url.to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            })
+            .expect_err("credential-bearing repo URLs should be rejected");
 
-        let message = error.to_string();
-        assert!(
-            message.contains("credential-bearing URLs are not accepted"),
-            "expected credential-bearing URL rejection message, got {message}"
-        );
-        assert!(
-            message.contains("#32"),
-            "expected credential-bearing URL rejection to reference #32, got {message}"
-        );
+            let message = error.to_string();
+            assert!(
+                message.contains("credential-bearing URLs are not accepted"),
+                "expected credential-bearing URL rejection message for {repo_url}, got {message}"
+            );
+            assert!(
+                message.contains("#32"),
+                "expected credential-bearing URL rejection to reference #32 for {repo_url}, got {message}"
+            );
+        }
     }
 
     #[test]

@@ -134,6 +134,36 @@ read_only = false
     .expect("config should parse")
 }
 
+fn config_with_ssh_default_repo_and_agent_scoped_mounts() -> Config {
+    Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+repo = "ssh://git@example.com/tesserine/agentd.git"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+
+[[agents.mounts]]
+source = "/home/core/.ssh/site-builder"
+target = "/home/site-builder/.ssh"
+read_only = true
+
+[[agents]]
+name = "code-reviewer"
+base_image = "ghcr.io/example/code-reviewer:latest"
+methodology_dir = "../groundwork"
+repo = "ssh://git@example.com/tesserine/review-target.git"
+
+[agents.command]
+argv = ["code-reviewer", "exec"]
+"#,
+    )
+    .expect("config should parse")
+}
+
 #[test]
 fn dispatch_run_resolves_repo_token_without_injecting_it_into_runtime_environment() {
     let _guard = env_lock()
@@ -476,6 +506,64 @@ fn dispatch_run_forwards_agent_mounts_into_session_spec() {
             },
         ]
     );
+}
+
+#[test]
+fn dispatch_run_forwards_ssh_default_repo_without_repo_token_source() {
+    let config = config_with_ssh_default_repo_and_agent_scoped_mounts();
+    let request = RunRequest {
+        agent: "site-builder".to_string(),
+        repo_url: None,
+        work_unit: None,
+        input: None,
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+    let state = state.lock().expect("recording state should lock");
+    let invocation = state
+        .last_invocation
+        .as_ref()
+        .expect("executor should receive invocation");
+
+    assert_eq!(
+        invocation.repo_url,
+        "ssh://git@example.com/tesserine/agentd.git"
+    );
+    assert_eq!(invocation.repo_token, None);
+}
+
+#[test]
+fn dispatch_run_does_not_forward_another_agents_ssh_mount() {
+    let config = config_with_ssh_default_repo_and_agent_scoped_mounts();
+    let request = RunRequest {
+        agent: "code-reviewer".to_string(),
+        repo_url: None,
+        work_unit: None,
+        input: None,
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+    let state = state.lock().expect("recording state should lock");
+    let spec = state
+        .last_spec
+        .as_ref()
+        .expect("executor should receive spec");
+    let invocation = state
+        .last_invocation
+        .as_ref()
+        .expect("executor should receive invocation");
+
+    assert_eq!(spec.agent_name, "code-reviewer");
+    assert!(spec.mounts.is_empty());
+    assert_eq!(
+        invocation.repo_url,
+        "ssh://git@example.com/tesserine/review-target.git"
+    );
+    assert_eq!(invocation.repo_token, None);
 }
 
 #[test]

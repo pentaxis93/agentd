@@ -74,13 +74,14 @@ base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
 # Default repository URL cloned for manual runs when `agentd run` omits a repo,
-# and for every scheduled run of this agent.
-repo = "https://github.com/pentaxis93/agentd.git"
+# and for every scheduled run of this agent. HTTPS, HTTP, git://, ssh://, and
+# user@host:path SSH forms are accepted.
+repo = "git@github.com:pentaxis93/agentd.git"
 # Optional five-field cron expression in daemon-local time.
 schedule = "*/15 * * * *"
-# Optional environment variable name resolved by the daemon for clone-only
-# repository authentication. This value does not flow into the agent runtime.
-repo_token_source = "SITE_BUILDER_REPO_TOKEN"
+# Optional environment variable name for HTTPS clone-only authentication.
+# SSH clones use mounted `.ssh` material instead.
+#repo_token_source = "SITE_BUILDER_REPO_TOKEN"
 # Exact argv for the agent process. agentd handles runa init and runa run.
 [agents.command]
 argv = ["site-builder", "exec"]
@@ -90,9 +91,10 @@ argv = ["site-builder", "exec"]
 # `source` must be an absolute host path and must already exist.
 # `target` must be an absolute path inside the container and must not
 # duplicate or overlap another mount target in the same agent.
-# `read_only = true` is appropriate for host-managed auth directories.
-#source = "/home/core/.claude"
-#target = "/home/site-builder/.claude"
+# `read_only = true` is appropriate for host-managed auth directories,
+# including OpenSSH material used for SSH repository clone and push.
+#source = "/home/core/.ssh/site-builder"
+#target = "/home/site-builder/.ssh"
 #read_only = true
 
 [[agents.credentials]]
@@ -125,14 +127,18 @@ agent, and runner-managed targets are reserved: `/agentd/methodology`,
 `/agentd/transcript`, `/home/{agent}`, `/home/{agent}/.agentd`, and
 `/home/{agent}/repo` plus their descendants. Other targets under `/home/{agent}` remain supported,
 including read-only auth mounts such as `/home/site-builder/.claude`.
+For SSH repository URLs, mount OpenSSH-compatible identity, config, and
+`known_hosts` material under `/home/{agent}/.ssh`; clone uses that material
+from the session user's home and does not require `repo_token_source`.
 Additional mounts are not relabelled; on SELinux-enabled hosts, operators must
 ensure each host path already has a container-compatible label. Runner-owned
 mounts such as
 methodology, invocation input, and the internal audit `runa/` subtree are
 relabelled by Podman from their canonical host source paths. The base image
 must provide `/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, `runa`,
-and whatever binaries the declared agent command uses. UID/GID `1000` must be
-available for the session user. When an agent declares `schedule`, it must also
+and whatever binaries the declared agent command uses. SSH repository clone
+also requires an OpenSSH-compatible client in the base image. UID/GID `1000`
+must be available for the session user. When an agent declares `schedule`, it must also
 declare `repo`. Schedules are evaluated in daemon-local time and missed fires
 are not backfilled after downtime. Persistent audit records default to
 `$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set

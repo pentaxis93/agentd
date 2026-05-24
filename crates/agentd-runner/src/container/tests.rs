@@ -665,6 +665,8 @@ fn clone_command_passes_repo_token_to_git_via_environment_not_argv() {
             timeout: None,
         },
         "/tmp/repo",
+        "/home/site-builder",
+        "site-builder:site-builder",
     );
     let original_path = env::var_os("PATH").expect("PATH should exist");
     let path =
@@ -713,6 +715,8 @@ fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
             timeout: None,
         },
         "/tmp/repo",
+        "/home/site-builder",
+        "site-builder:site-builder",
     );
     let original_path = env::var_os("PATH").expect("PATH should exist");
     let path =
@@ -737,6 +741,25 @@ fn clone_command_omits_git_auth_environment_when_repo_token_is_absent() {
     assert!(!git_env.contains("GIT_CONFIG_VALUE_0=Authorization: Bearer"));
     assert!(git_env.contains("GIT_TERMINAL_PROMPT=0"));
     assert!(!git_env.contains(REPO_TOKEN_ENV));
+}
+
+#[test]
+fn build_container_script_runs_ssh_clone_as_session_user_with_session_home() {
+    let script = build_container_script(
+        &test_session_spec(),
+        &SessionInvocation {
+            repo_url: "ssh://git@example.com/tesserine/agentd.git".to_string(),
+            repo_token: None,
+            work_unit: None,
+            input: None,
+            timeout: None,
+        },
+        None,
+    );
+
+    assert!(script.contains(
+        "GIT_TERMINAL_PROMPT=0 HOME='/home/site-builder' gosu 'site-builder:site-builder' git clone --no-hardlinks -- 'ssh://git@example.com/tesserine/agentd.git' '/home/site-builder/repo'"
+    ));
 }
 
 #[test]
