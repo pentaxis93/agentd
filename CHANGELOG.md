@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Runner setup now supports SSH repository clone through agent-scoped mounted
   OpenSSH material, including `ssh://` and `user@host:path` repository URLs.
+- Agent configuration now accepts an optional `forge` field and injects the
+  selected value as `GROUNDWORK_FORGE`, defaulting omitted values to `github`.
 
 ## [0.1.2] — 2026-05-17
 ### Fixed

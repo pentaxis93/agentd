@@ -109,6 +109,22 @@ source = "AGENTD_GITHUB_TOKEN"
     .expect("config should parse")
 }
 
+fn config_with_forge(forge: &str) -> Config {
+    Config::from_str(&format!(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+forge = "{forge}"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#
+    ))
+    .expect("config should parse")
+}
+
 fn config_with_mounts() -> Config {
     Config::from_str(
         r#"
@@ -162,6 +178,61 @@ argv = ["code-reviewer", "exec"]
 "#,
     )
     .expect("config should parse")
+}
+
+#[test]
+fn dispatch_run_forwards_active_forge_into_session_spec() {
+    let config = config_with_forge("sourcehut");
+    let request = RunRequest {
+        agent: "site-builder".to_string(),
+        repo_url: Some("https://example.com/repo.git".to_string()),
+        work_unit: None,
+        input: None,
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+    let state = state.lock().expect("recording state should lock");
+    let spec = state
+        .last_spec
+        .as_ref()
+        .expect("executor should receive spec");
+
+    assert_eq!(spec.forge, "sourcehut");
+}
+
+#[test]
+fn dispatch_run_defaults_active_forge_to_github() {
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse");
+    let request = RunRequest {
+        agent: "site-builder".to_string(),
+        repo_url: Some("https://example.com/repo.git".to_string()),
+        work_unit: None,
+        input: None,
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+    let state = state.lock().expect("recording state should lock");
+    let spec = state
+        .last_spec
+        .as_ref()
+        .expect("executor should receive spec");
+
+    assert_eq!(spec.forge, "github");
 }
 
 #[test]

@@ -3,10 +3,10 @@
 //! Bridges operator-facing configuration to daemon dispatch and the runner's
 //! [`SessionSpec`] model. Validation here is stricter than the runner's own
 //! validation — it enforces uniqueness (no duplicate agent or credential
-//! names), non-empty fields, and whitespace hygiene in addition to the
-//! runner's format and reservation rules. Relative daemon runtime paths and
-//! `methodology_dir` are resolved against the configuration file location when
-//! loaded from disk.
+//! names), non-empty fields, active forge defaulting, and whitespace hygiene
+//! in addition to the runner's format and reservation rules. Relative daemon
+//! runtime paths and `methodology_dir` are resolved against the configuration
+//! file location when loaded from disk.
 //!
 //! [`SessionSpec`]: agentd_runner::SessionSpec
 
@@ -25,13 +25,15 @@ use sha2::{Digest, Sha256};
 
 use crate::runtime_paths::{RuntimePathError, default_daemon_runtime_paths};
 
+const DEFAULT_ACTIVE_FORGE: &str = "github";
+
 /// Validated daemon and agent registry parsed from a TOML configuration file.
 ///
 /// Guarantees that daemon runtime paths are present, all agent names are
-/// unique and valid, all required fields are non-empty, and all credential
-/// names are valid environment variable names. Relative daemon runtime paths
-/// and `methodology_dir` paths are resolved against the configuration file's
-/// parent directory.
+/// unique and valid, all required fields are non-empty, active forge defaults
+/// are applied, and all credential names are valid environment variable names.
+/// Relative daemon runtime paths and `methodology_dir` paths are resolved
+/// against the configuration file's parent directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     daemon: DaemonConfig,
@@ -137,6 +139,13 @@ impl Config {
                     Some(value)
                 }
                 None => None,
+            };
+            let forge = match raw_agent.forge {
+                Some(value) => {
+                    validate_lookup_key("forge", &value, Some(raw_agent.name.as_str()), None)?;
+                    value
+                }
+                None => DEFAULT_ACTIVE_FORGE.to_string(),
             };
 
             if raw_agent.command.argv.is_empty() {
@@ -263,6 +272,7 @@ impl Config {
                 repo,
                 schedule,
                 repo_token_source,
+                forge,
                 credentials,
                 agent_command,
             });
@@ -300,6 +310,7 @@ pub struct Agent {
     repo: Option<String>,
     schedule: Option<String>,
     repo_token_source: Option<String>,
+    forge: String,
     credentials: Vec<CredentialConfig>,
     agent_command: Vec<String>,
 }
@@ -342,6 +353,12 @@ impl Agent {
     /// not injected into the session runtime environment.
     pub fn repo_token_source(&self) -> Option<&str> {
         self.repo_token_source.as_deref()
+    }
+
+    /// Active forge tag injected into each launched session for Groundwork
+    /// forge-specific operation resolution.
+    pub fn forge(&self) -> &str {
+        &self.forge
     }
 
     /// Declared credentials for this agent. Each credential's name is a
@@ -647,12 +664,10 @@ impl fmt::Display for ConfigError {
                     "agent '{agent}' defines duplicate credential name '{name}'"
                 )
             }
-            ConfigError::InvalidCredentialName { agent, name } => {
-                write!(
-                    f,
-                    "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ',' or '=' and must not use runner-owned names such as AGENT_NAME, AGENTD_WORK_UNIT, AGENTD_REPO_TOKEN, RUNA_TRANSCRIPT_DIR, or RUNA_TRANSCRIPT_REDACT_ENV; transcript subsystem names are set internally"
-                )
-            }
+            ConfigError::InvalidCredentialName { agent, name } => write!(
+                f,
+                "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ',' or '=' and must not use runner-owned names such as AGENT_NAME, GROUNDWORK_FORGE, AGENTD_WORK_UNIT, AGENTD_REPO_TOKEN, RUNA_TRANSCRIPT_DIR, or RUNA_TRANSCRIPT_REDACT_ENV; transcript subsystem names are set internally"
+            ),
             ConfigError::EmptyField {
                 field,
                 agent,
@@ -826,6 +841,7 @@ struct RawAgent {
     repo: Option<String>,
     schedule: Option<String>,
     repo_token_source: Option<String>,
+    forge: Option<String>,
     #[serde(default)]
     credentials: Vec<RawCredentialConfig>,
 }

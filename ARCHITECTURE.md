@@ -47,6 +47,7 @@ service:
 | Daemon socket and PID file | daemon process; host clients use the socket through the host mount | Configure explicit daemon runtime paths inside the container and mount their parent directory from the host runtime location. |
 | Host Podman socket | daemon process through the Podman client | Mount the host rootless Podman socket to the path named by `CONTAINER_HOST`. |
 | Credential sources | daemon process environment | Inject the environment variables named by agent credentials into the daemon container. |
+| Active forge | agent config | Set one forge tag per session; omitted values default to `github` and are injected as `GROUNDWORK_FORGE`. |
 | `methodology_dir` and request/artifact schemas | daemon process reads; host Podman resolves direct relabelled methodology source | The path must exist for the daemon and be valid from the host Podman service's filesystem view. |
 | `audit_root` | daemon process creates/chmods; host Podman resolves direct relabelled audit sources; session containers write audit entries | Mount durable host storage at the configured audit root, with the daemon UID aligned to the session writer's mapped host UID or granted equivalent chmod authority. |
 | Agent-declared `mounts.source` | daemon process canonicalizes; host Podman resolves staged bind sources | Mount or expose each source so the daemon and host Podman agree on the source path. |
@@ -68,7 +69,7 @@ property.
 
 ### Terminology
 
-- **Agent**: a named, reusable environment specification in the daemon config — base image, methodology, optional default repo, optional schedule, credentials, and command. What the operator declares.
+- **Agent**: a named, reusable environment specification in the daemon config — base image, methodology, optional active forge, optional default repo, optional schedule, credentials, and command. What the operator declares.
 - **Session**: a single execution created from an agent plus invocation parameters (repo, work unit, timeout). What the runner manages.
 
 ## 2. Agent Capability Needs
@@ -183,7 +184,7 @@ The runner prepares the execution environment:
 
 1. Creates an ephemeral Podman container from the agent's configured base image. That image must provide a POSIX-compatible shell at `/bin/sh` because the runner's container entrypoint executes through that path.
 2. Sets identity inside the container, including `AGENT_NAME` and a unique container name derived from the agent.
-3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments.
+3. Injects caller-resolved credentials as environment variables for that session only via Podman-managed secrets rather than inline CLI arguments, and injects the non-secret active forge tag as `GROUNDWORK_FORGE`.
 4. Mounts the configured methodology directory read-only.
 5. Creates an unprivileged unix user whose username is the configured agent name, with home directory `/home/{username}` and UID/GID `1000`, and clones the requested repository into `/home/{username}/repo`. This clone step is a plain in-container `git clone`: the base image must provide `git`, `find`, `groupadd`, `useradd`, and `gosu` in `PATH`, it accepts `https://`, `http://`, `git://`, `ssh://`, and `user@host:path` SSH repository URLs, rejects credential-bearing URLs up front, and can authenticate private HTTPS clones with an invocation-scoped bearer `repo_token`. SSH clone runs as the session user with `HOME=/home/{username}` so OpenSSH reads agent-scoped mounted material under that home, typically `/home/{username}/.ssh`; it does not use `repo_token_source`. The token is injected through a Podman secret, converted into one-shot git configuration for the clone process only, and removed before `runa init` and the agent command start. Base images that lack `/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, or `runa`, or that cannot reserve UID/GID `1000` for the session user, are not supported. SSH clone additionally requires an OpenSSH-compatible client in the base image.
 6. Resolves the host audit root, creates it if needed, and probes writability before accepting work. The default for rootless deployments is `$XDG_STATE_HOME/tesserine/audit`, falling back to `$HOME/.local/state/tesserine/audit` when `XDG_STATE_HOME` is unset. Operators may override that with `daemon.audit_root`; root-owned system installs should typically point it at `/var/lib/tesserine/audit`. After resolution, the runner allocates a host audit record at `{audit_root}/{agent}/{session_id}/`, writes start metadata to `agentd/session.json`, bind-mounts the `runa/` subtree into the container at `/home/{username}/.agentd/audit/runa`, and bind-mounts `agentd/transcript/` at `/agentd/transcript` before the runtime initializes runa state.
@@ -240,6 +241,7 @@ agentd runs sessions in ephemeral Podman containers so agents remain separated f
 
 From inside the environment, an agent should see:
 - identity-related environment variables
+- `GROUNDWORK_FORGE`, the active forge tag Groundwork reads to resolve forge-specific mechanics
 - `$HOME` set to `/home/{username}`
 - a read-only methodology mount rooted at `manifest.toml`
 - a read-only invocation-input mount at `/agentd/invocation-input` when manual input is supplied

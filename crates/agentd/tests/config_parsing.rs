@@ -192,6 +192,7 @@ fn parses_example_config_into_static_agent_settings() {
         site_builder.repo_token_source(),
         Some("SITE_BUILDER_REPO_TOKEN")
     );
+    assert_eq!(site_builder.forge(), "github");
     assert_eq!(site_builder.agent_command(), ["site-builder", "exec"]);
     assert_eq!(site_builder.credentials().len(), 1);
     assert_eq!(site_builder.credentials()[0].name(), "GITHUB_TOKEN");
@@ -216,6 +217,7 @@ fn parses_example_config_into_static_agent_settings() {
         code_reviewer.repo_token_source(),
         Some("CODE_REVIEWER_REPO_TOKEN")
     );
+    assert_eq!(code_reviewer.forge(), "github");
     assert_eq!(code_reviewer.agent_command(), ["code-reviewer", "exec"]);
     assert_eq!(code_reviewer.credentials().len(), 1);
     assert_eq!(code_reviewer.credentials()[0].name(), "GITHUB_TOKEN");
@@ -827,6 +829,61 @@ argv = ["site-builder", "exec"]
 }
 
 #[test]
+fn parses_agent_forge_as_active_session_forge() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("agent-forge");
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+forge = "sourcehut"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse active forge");
+
+    let agent = config.agent("site-builder").expect("agent should exist");
+
+    assert_eq!(agent.forge(), "sourcehut");
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+}
+
+#[test]
+fn defaults_agent_forge_to_github_when_omitted() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("default-agent-forge");
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should default active forge");
+
+    let agent = config.agent("site-builder").expect("agent should exist");
+
+    assert_eq!(agent.forge(), "github");
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+}
+
+#[test]
 fn parses_agent_repo_as_optional_default_clone_url() {
     let _guard = env_lock()
         .lock()
@@ -1314,6 +1371,68 @@ argv = ["site-builder", "exec"]
             }
             other => panic!("expected whitespace validation error, got {other}"),
         }
+    }
+}
+
+#[test]
+fn rejects_agent_forge_with_outer_whitespace() {
+    for forge in [" sourcehut", "sourcehut "] {
+        let error = Config::from_str(&format!(
+            r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+forge = "{forge}"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#
+        ))
+        .expect_err("whitespace-padded forge values should be rejected");
+
+        match error {
+            ConfigError::FieldHasOuterWhitespace {
+                field,
+                agent,
+                credential,
+            } => {
+                assert_eq!(field, "forge");
+                assert_eq!(agent.as_deref(), Some("site-builder"));
+                assert_eq!(credential, None);
+            }
+            other => panic!("expected whitespace validation error, got {other}"),
+        }
+    }
+}
+
+#[test]
+fn rejects_empty_agent_forge() {
+    let error = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+forge = ""
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect_err("empty forge values should be rejected");
+
+    match error {
+        ConfigError::EmptyField {
+            field,
+            agent,
+            credential,
+        } => {
+            assert_eq!(field, "forge");
+            assert_eq!(agent.as_deref(), Some("site-builder"));
+            assert_eq!(credential, None);
+        }
+        other => panic!("expected empty field validation error, got {other}"),
     }
 }
 
