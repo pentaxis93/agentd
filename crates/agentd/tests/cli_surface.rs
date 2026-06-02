@@ -1,4 +1,6 @@
+use std::ffi::OsString;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,9 +8,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use agentd::SessionExecutor;
 use agentd::config::Config;
-use agentd::{SessionExecutor, run_daemon_until_shutdown};
-use agentd_runner::{InvocationInput, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+use agentd::daemon::run_daemon_until_shutdown_with_reconciler;
+use agentd_runner::{
+    InvocationInput, RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
+    StartupReconciliationReport,
+};
 use serde_json::json;
 
 type DaemonHandle = thread::JoinHandle<Result<(), agentd::DaemonError>>;
@@ -163,6 +169,63 @@ fn wait_for_path(path: &Path) {
     panic!("timed out waiting for {}", path.display());
 }
 
+fn fake_podman_path(name: &str) -> OsString {
+    let unique = format!(
+        "agentd-cli-fake-podman-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    );
+    let bin_dir = std::env::temp_dir().join(unique).join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("fake podman bin dir should be created");
+    let podman_path = bin_dir.join("podman");
+    std::fs::write(
+        &podman_path,
+        r#"#!/bin/sh
+case "$1" in
+  ps)
+    printf '[]\n'
+    ;;
+  secret)
+    case "$2" in
+      ls)
+        exit 0
+        ;;
+      rm)
+        exit 0
+        ;;
+      *)
+        echo "unexpected podman secret command: $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  rm)
+    exit 0
+    ;;
+  *)
+    echo "unexpected podman command: $*" >&2
+    exit 1
+    ;;
+esac
+"#,
+    )
+    .expect("fake podman script should be written");
+    let mut permissions = std::fs::metadata(&podman_path)
+        .expect("fake podman metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&podman_path, permissions)
+        .expect("fake podman script should be executable");
+
+    std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH should exist for tests"),
+    )))
+    .expect("fake podman PATH should be constructible")
+}
+
 fn terminate(child: &mut Child) -> io::Result<()> {
     let status = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
@@ -181,8 +244,11 @@ fn start_test_daemon(
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let executor = FixedOutcomeExecutor { outcome };
-    let handle =
-        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_with_reconciler(daemon_config, executor, daemon_shutdown, || {
+            Ok(StartupReconciliationReport::default())
+        })
+    });
     wait_for_path(config.daemon().socket_path());
     (shutdown, handle, config)
 }
@@ -196,8 +262,11 @@ fn start_recording_test_daemon(
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let (executor, invocations) = RecordingInvocationExecutor::new(outcome);
-    let handle =
-        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_with_reconciler(daemon_config, executor, daemon_shutdown, || {
+            Ok(StartupReconciliationReport::default())
+        })
+    });
     wait_for_path(config.daemon().socket_path());
     (shutdown, handle, config, invocations)
 }
@@ -267,6 +336,7 @@ fn binary_daemon_subcommand_starts_daemon_mode() {
             config_path.to_str().expect("config path should be utf-8"),
         ])
         .env("AGENTD_LOG_FORMAT", "text")
+        .env("PATH", fake_podman_path("daemon-subcommand"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -316,6 +386,7 @@ fn binary_bare_command_with_config_starts_daemon_mode() {
             config_path.to_str().expect("config path should be utf-8"),
         ])
         .env("AGENTD_LOG_FORMAT", "text")
+        .env("PATH", fake_podman_path("bare-command"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()

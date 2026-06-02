@@ -7,12 +7,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentd::config::{Config, ConfigError};
+use agentd::daemon::run_daemon_until_shutdown_with_reconciler;
 use agentd::{
     ClientError, DaemonError, RunRequest, RunnerSessionExecutor, SessionExecutor, request_run,
-    run_daemon_until_shutdown,
 };
 use agentd_runner::InvocationInput;
-use agentd_runner::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+use agentd_runner::{
+    RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+};
 use serde_json::json;
 
 fn env_lock() -> &'static Mutex<()> {
@@ -205,6 +207,17 @@ fn wait_for_path_removal(path: &std::path::Path) {
     panic!("timed out waiting for removal of {}", path.display());
 }
 
+fn run_daemon_until_shutdown_for_test(
+    config: Config,
+    executor: impl SessionExecutor + Send + Sync + Clone + 'static,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), DaemonError> {
+    let _daemon_instance_id = config.daemon().daemon_instance_id()?;
+    run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
+        Ok(StartupReconciliationReport::default())
+    })
+}
+
 #[test]
 fn daemon_reports_run_outcome_back_through_client_request() {
     let _guard = env_lock()
@@ -221,8 +234,9 @@ fn daemon_reports_run_outcome_back_through_client_request() {
     let executor = FixedOutcomeExecutor {
         outcome: SessionOutcome::GenericFailure { exit_code: 23 },
     };
-    let handle =
-        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
+    });
     wait_for_path(config.daemon().socket_path());
 
     let outcome = request_run(
@@ -287,8 +301,9 @@ fn daemon_round_trips_typed_invocation_input_through_the_socket_protocol() {
     let daemon_shutdown = shutdown.clone();
     let (executor, invocations) =
         RecordingInvocationExecutor::new(SessionOutcome::Success { exit_code: 0 });
-    let handle =
-        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
+    });
     wait_for_path(config.daemon().socket_path());
 
     let outcome = request_run(
@@ -341,7 +356,7 @@ fn daemon_rejects_conflicting_work_unit_and_input_from_socket_callers() {
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, RunnerSessionExecutor, daemon_shutdown)
+        run_daemon_until_shutdown_for_test(daemon_config, RunnerSessionExecutor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
@@ -398,11 +413,12 @@ fn starting_second_daemon_instance_fails_with_existing_pid() {
     let executor = FixedOutcomeExecutor {
         outcome: SessionOutcome::Success { exit_code: 0 },
     };
-    let first_handle =
-        thread::spawn(move || run_daemon_until_shutdown(first_config, executor, first_shutdown));
+    let first_handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(first_config, executor, first_shutdown)
+    });
     wait_for_path(config.daemon().socket_path());
 
-    let second_result = run_daemon_until_shutdown(
+    let second_result = run_daemon_until_shutdown_for_test(
         config.clone(),
         FixedOutcomeExecutor {
             outcome: SessionOutcome::Success { exit_code: 0 },
@@ -443,8 +459,9 @@ fn daemon_shutdown_removes_pid_file_and_socket() {
     let executor = FixedOutcomeExecutor {
         outcome: SessionOutcome::Success { exit_code: 0 },
     };
-    let handle =
-        thread::spawn(move || run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown));
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
+    });
     wait_for_path(config.daemon().socket_path());
     wait_for_path(config.daemon().pid_file());
 
@@ -486,7 +503,7 @@ fn daemon_accepts_additional_runs_while_a_previous_run_is_still_executing() {
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
@@ -581,7 +598,7 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
@@ -645,7 +662,7 @@ fn daemon_shutdown_stops_accepting_new_runs() {
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(daemon_config, daemon_executor, daemon_shutdown)
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
@@ -737,7 +754,7 @@ source = "AGENTD_GITHUB_TOKEN"
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown(
+        run_daemon_until_shutdown_for_test(
             daemon_config,
             FixedOutcomeExecutor {
                 outcome: SessionOutcome::Success { exit_code: 0 },
@@ -782,7 +799,7 @@ fn daemon_startup_refuses_to_delete_a_non_socket_socket_path() {
     std::fs::write(config.daemon().socket_path(), original_contents)
         .expect("non-socket placeholder file should be written");
 
-    let error = run_daemon_until_shutdown(
+    let error = run_daemon_until_shutdown_for_test(
         config.clone(),
         FixedOutcomeExecutor {
             outcome: SessionOutcome::Success { exit_code: 0 },
@@ -824,7 +841,7 @@ argv = ["site-builder", "exec"]
     )
     .expect("config should parse");
 
-    let error = run_daemon_until_shutdown(
+    let error = run_daemon_until_shutdown_for_test(
         config,
         FixedOutcomeExecutor {
             outcome: SessionOutcome::Success { exit_code: 0 },

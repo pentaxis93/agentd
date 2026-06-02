@@ -106,8 +106,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use crate::{SessionExecutor, run_daemon_until_shutdown};
-    use agentd_runner::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
+    use agentd_runner::{
+        RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    };
+
+    use crate::SessionExecutor;
+    use crate::daemon::run_daemon_until_shutdown_with_reconciler;
 
     #[derive(Clone)]
     struct RecordingExecutor {
@@ -227,7 +231,12 @@ argv = ["site-builder", "exec"]
         let daemon_shutdown = Arc::clone(&shutdown);
         let (executor, invocations) = RecordingExecutor::new();
         let handle = thread::spawn(move || {
-            run_daemon_until_shutdown(daemon_config, executor, daemon_shutdown)
+            run_daemon_until_shutdown_with_reconciler(
+                daemon_config,
+                executor,
+                daemon_shutdown,
+                || Ok(StartupReconciliationReport::default()),
+            )
         });
         wait_for_path(config.daemon().socket_path());
 

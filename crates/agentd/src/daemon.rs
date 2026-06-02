@@ -170,7 +170,8 @@ pub fn run_daemon_until_shutdown(
     })
 }
 
-fn run_daemon_until_shutdown_with_reconciler<F>(
+#[doc(hidden)]
+pub fn run_daemon_until_shutdown_with_reconciler<F>(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
     shutdown: Arc<AtomicBool>,
