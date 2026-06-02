@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
-const GROUNDWORK_FORGE_ENV: &str = "GROUNDWORK_FORGE";
+const GROUNDWORK_FORGE_TYPE_ENV: &str = "GROUNDWORK_FORGE_TYPE";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
 pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 pub(crate) const TRANSCRIPT_DIR_ENV: &str = "RUNA_TRANSCRIPT_DIR";
@@ -42,9 +42,9 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
             path: spec.audit_root.clone(),
         });
     }
-    if spec.forge.trim().is_empty() || spec.forge != spec.forge.trim() {
-        return Err(RunnerError::InvalidForge {
-            forge: spec.forge.clone(),
+    if spec.forge_type.trim().is_empty() || spec.forge_type != spec.forge_type.trim() {
+        return Err(RunnerError::InvalidForgeType {
+            forge_type: spec.forge_type.clone(),
         });
     }
     if spec.agent_command.is_empty() || spec.agent_command.iter().any(|arg| arg.is_empty()) {
@@ -170,7 +170,7 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 /// Validates an environment variable name against naming rules.
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
-/// runner-managed names such as `AGENT_NAME`, `GROUNDWORK_FORGE`,
+/// runner-managed names such as `AGENT_NAME`, `GROUNDWORK_FORGE_TYPE`,
 /// `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`, and
 /// `RUNA_TRANSCRIPT_REDACT_ENV`. Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
@@ -233,7 +233,7 @@ pub fn validate_repo_url(repo_url: &str) -> Result<(), RunnerError> {
 pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 2] {
     [
         (AGENT_NAME_ENV, &spec.agent_name),
-        (GROUNDWORK_FORGE_ENV, &spec.forge),
+        (GROUNDWORK_FORGE_TYPE_ENV, &spec.forge_type),
     ]
 }
 
@@ -372,7 +372,7 @@ fn is_reserved_environment_name(name: &str) -> bool {
     matches!(
         name,
         AGENT_NAME_ENV
-            | GROUNDWORK_FORGE_ENV
+            | GROUNDWORK_FORGE_TYPE_ENV
             | WORK_UNIT_ENV
             | REPO_TOKEN_ENV
             | TRANSCRIPT_DIR_ENV
@@ -486,7 +486,7 @@ mod tests {
     fn validate_spec_rejects_reserved_environment_names() {
         for reserved_name in [
             "AGENT_NAME",
-            "GROUNDWORK_FORGE",
+            "GROUNDWORK_FORGE_TYPE",
             WORK_UNIT_ENV,
             REPO_TOKEN_ENV,
             "RUNA_TRANSCRIPT_DIR",
@@ -539,26 +539,26 @@ mod tests {
     }
 
     #[test]
-    fn validate_spec_rejects_empty_or_whitespace_padded_forge() {
-        for forge in ["", " ", " sourcehut", "sourcehut "] {
+    fn validate_spec_rejects_empty_or_whitespace_padded_forge_type() {
+        for forge_type in ["", " ", " sourcehut", "sourcehut "] {
             let error = validate_spec(&SessionSpec {
-                forge: forge.to_string(),
+                forge_type: forge_type.to_string(),
                 ..test_session_spec()
             })
-            .expect_err("forge values must be non-empty and trimmed");
+            .expect_err("forge type values must be non-empty and trimmed");
 
             match &error {
-                RunnerError::InvalidForge {
-                    forge: invalid_forge,
+                RunnerError::InvalidForgeType {
+                    forge_type: invalid_forge_type,
                 } => {
-                    assert_eq!(invalid_forge, forge);
+                    assert_eq!(invalid_forge_type, forge_type);
                 }
-                other => panic!("expected InvalidForge, got {other:?}"),
+                other => panic!("expected InvalidForgeType, got {other:?}"),
             }
 
             assert!(
-                error.to_string().contains("forge"),
-                "invalid forge error should explain forge validation: {error}"
+                error.to_string().contains("forge type"),
+                "invalid forge type error should explain forge type validation: {error}"
             );
         }
     }

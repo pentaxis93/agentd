@@ -157,7 +157,7 @@ pub fn dispatch_run(
                 base_image: agent.base_image().to_string(),
                 methodology_dir: agent.methodology_dir().to_path_buf(),
                 audit_root,
-                forge: agent.forge().to_string(),
+                forge_type: agent.forge_type().to_string(),
                 mounts: agent
                     .mounts()
                     .iter()

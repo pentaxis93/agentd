@@ -1207,7 +1207,7 @@ fn run_session_injects_empty_environment_values_via_direct_env_args() {
 }
 
 #[test]
-fn run_session_injects_active_forge_as_groundwork_forge_environment() {
+fn run_session_injects_active_forge_type_as_groundwork_forge_type_environment() {
     let _guard = fake_podman_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1217,7 +1217,7 @@ fn run_session_injects_active_forge_as_groundwork_forge_environment() {
     let methodology_dir = fixture.create_methodology_dir("runner-methodology");
     let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
         methodology_dir,
-        forge: "sourcehut".to_string(),
+        forge_type: "sourcehut".to_string(),
         ..test_session_spec()
     });
 
@@ -1227,7 +1227,7 @@ fn run_session_injects_active_forge_as_groundwork_forge_environment() {
     );
 
     let create_args = fixture.create_args();
-    assert!(create_args.contains("--env GROUNDWORK_FORGE=sourcehut"));
+    assert!(create_args.contains("--env GROUNDWORK_FORGE_TYPE=sourcehut"));
 }
 
 #[test]
