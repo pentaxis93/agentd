@@ -14,7 +14,7 @@ use std::time::Duration;
 
 /// Static configuration for a session, derived from an agent.
 ///
-/// Describes the agent identity, container image, methodology, active forge,
+/// Describes the agent identity, container image, methodology, active forge type,
 /// command, and caller-resolved environment variables. Validated by
 /// [`run_session`](crate::run_session) before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,9 +39,9 @@ pub struct SessionSpec {
     /// Host-side root where persistent audit records are created. The runner
     /// stores each session under `<audit_root>/<agent>/<session_id>/`.
     pub audit_root: PathBuf,
-    /// Active forge tag exposed to the session as `GROUNDWORK_FORGE` so
+    /// Active forge type exposed to the session as `GROUNDWORK_FORGE_TYPE` so
     /// Groundwork can resolve forge-invariant operations.
-    pub forge: String,
+    pub forge_type: String,
     /// Additional host bind mounts declared by the selected agent.
     pub mounts: Vec<BindMount>,
     /// Command array executed directly from the cloned repository after
@@ -52,7 +52,7 @@ pub struct SessionSpec {
     /// Non-empty values are passed via ephemeral podman secrets; empty values
     /// are passed as direct `--env` assignments.
     /// Names reserved for runner-owned values such as `AGENT_NAME`,
-    /// `GROUNDWORK_FORGE`, `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`,
+    /// `GROUNDWORK_FORGE_TYPE`, `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`,
     /// `RUNA_TRANSCRIPT_DIR`, and `RUNA_TRANSCRIPT_REDACT_ENV` are rejected
     /// during validation.
     pub environment: Vec<ResolvedEnvironmentVariable>,
@@ -336,9 +336,9 @@ pub enum RunnerError {
     /// The configured audit root path is not absolute. Produced during spec
     /// validation.
     InvalidAuditRoot { path: PathBuf },
-    /// The active forge tag is empty or has surrounding whitespace. Produced
+    /// The active forge type is empty or has surrounding whitespace. Produced
     /// during spec validation.
-    InvalidForge { forge: String },
+    InvalidForgeType { forge_type: String },
     /// The repository URL is not a supported remote form (`https://`,
     /// `http://`, `git://`), embeds credentials, or is paired with
     /// `repo_token` without using `https://`. Produced during invocation
@@ -408,9 +408,9 @@ impl fmt::Display for RunnerError {
             RunnerError::InvalidAuditRoot { path } => {
                 write!(f, "audit_root must be an absolute path: {}", path.display())
             }
-            RunnerError::InvalidForge { forge } => write!(
+            RunnerError::InvalidForgeType { forge_type } => write!(
                 f,
-                "forge must not be empty or contain surrounding whitespace: {forge:?}"
+                "forge type (`forge_type`) must not be empty or contain surrounding whitespace: {forge_type:?}"
             ),
             RunnerError::InvalidRepoUrl { message } => write!(f, "repo_url {message}"),
             RunnerError::InvalidInvocationInput { message } => write!(f, "{message}"),

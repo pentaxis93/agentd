@@ -109,14 +109,14 @@ source = "AGENTD_GITHUB_TOKEN"
     .expect("config should parse")
 }
 
-fn config_with_forge(forge: &str) -> Config {
+fn config_with_forge_type(forge_type: &str) -> Config {
     Config::from_str(&format!(
         r#"
 [[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
-forge = "{forge}"
+forge_type = "{forge_type}"
 
 [agents.command]
 argv = ["site-builder", "exec"]
@@ -181,8 +181,8 @@ argv = ["code-reviewer", "exec"]
 }
 
 #[test]
-fn dispatch_run_forwards_active_forge_into_session_spec() {
-    let config = config_with_forge("sourcehut");
+fn dispatch_run_forwards_active_forge_type_into_session_spec() {
+    let config = config_with_forge_type("sourcehut");
     let request = RunRequest {
         agent: "site-builder".to_string(),
         repo_url: Some("https://example.com/repo.git".to_string()),
@@ -199,11 +199,11 @@ fn dispatch_run_forwards_active_forge_into_session_spec() {
         .as_ref()
         .expect("executor should receive spec");
 
-    assert_eq!(spec.forge, "sourcehut");
+    assert_eq!(spec.forge_type, "sourcehut");
 }
 
 #[test]
-fn dispatch_run_defaults_active_forge_to_github() {
+fn dispatch_run_defaults_active_forge_type_to_github() {
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -232,7 +232,7 @@ argv = ["site-builder", "exec"]
         .as_ref()
         .expect("executor should receive spec");
 
-    assert_eq!(spec.forge, "github");
+    assert_eq!(spec.forge_type, "github");
 }
 
 #[test]

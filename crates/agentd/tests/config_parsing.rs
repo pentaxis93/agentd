@@ -192,7 +192,7 @@ fn parses_example_config_into_static_agent_settings() {
         site_builder.repo_token_source(),
         Some("SITE_BUILDER_REPO_TOKEN")
     );
-    assert_eq!(site_builder.forge(), "github");
+    assert_eq!(site_builder.forge_type(), "github");
     assert_eq!(site_builder.agent_command(), ["site-builder", "exec"]);
     assert_eq!(site_builder.credentials().len(), 1);
     assert_eq!(site_builder.credentials()[0].name(), "GITHUB_TOKEN");
@@ -217,7 +217,7 @@ fn parses_example_config_into_static_agent_settings() {
         code_reviewer.repo_token_source(),
         Some("CODE_REVIEWER_REPO_TOKEN")
     );
-    assert_eq!(code_reviewer.forge(), "github");
+    assert_eq!(code_reviewer.forge_type(), "github");
     assert_eq!(code_reviewer.agent_command(), ["code-reviewer", "exec"]);
     assert_eq!(code_reviewer.credentials().len(), 1);
     assert_eq!(code_reviewer.credentials()[0].name(), "GITHUB_TOKEN");
@@ -829,39 +829,39 @@ argv = ["site-builder", "exec"]
 }
 
 #[test]
-fn parses_agent_forge_as_active_session_forge() {
+fn parses_agent_forge_type_as_active_session_forge_type() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    set_xdg_runtime_dir("agent-forge");
+    set_xdg_runtime_dir("agent-forge-type");
     let config = Config::from_str(
         r#"
 [[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
-forge = "sourcehut"
+forge_type = "sourcehut"
 
 [agents.command]
 argv = ["site-builder", "exec"]
 "#,
     )
-    .expect("config should parse active forge");
+    .expect("config should parse active forge type");
 
     let agent = config.agent("site-builder").expect("agent should exist");
 
-    assert_eq!(agent.forge(), "sourcehut");
+    assert_eq!(agent.forge_type(), "sourcehut");
     unsafe {
         std::env::remove_var("XDG_RUNTIME_DIR");
     }
 }
 
 #[test]
-fn defaults_agent_forge_to_github_when_omitted() {
+fn defaults_agent_forge_type_to_github_when_omitted() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    set_xdg_runtime_dir("default-agent-forge");
+    set_xdg_runtime_dir("default-agent-forge-type");
     let config = Config::from_str(
         r#"
 [[agents]]
@@ -873,11 +873,11 @@ methodology_dir = "../groundwork"
 argv = ["site-builder", "exec"]
 "#,
     )
-    .expect("config should default active forge");
+    .expect("config should default active forge type");
 
     let agent = config.agent("site-builder").expect("agent should exist");
 
-    assert_eq!(agent.forge(), "github");
+    assert_eq!(agent.forge_type(), "github");
     unsafe {
         std::env::remove_var("XDG_RUNTIME_DIR");
     }
@@ -1375,21 +1375,21 @@ argv = ["site-builder", "exec"]
 }
 
 #[test]
-fn rejects_agent_forge_with_outer_whitespace() {
-    for forge in [" sourcehut", "sourcehut "] {
+fn rejects_agent_forge_type_with_outer_whitespace() {
+    for forge_type in [" sourcehut", "sourcehut "] {
         let error = Config::from_str(&format!(
             r#"
 [[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
-forge = "{forge}"
+forge_type = "{forge_type}"
 
 [agents.command]
 argv = ["site-builder", "exec"]
 "#
         ))
-        .expect_err("whitespace-padded forge values should be rejected");
+        .expect_err("whitespace-padded forge type values should be rejected");
 
         match error {
             ConfigError::FieldHasOuterWhitespace {
@@ -1397,7 +1397,7 @@ argv = ["site-builder", "exec"]
                 agent,
                 credential,
             } => {
-                assert_eq!(field, "forge");
+                assert_eq!(field, "forge_type");
                 assert_eq!(agent.as_deref(), Some("site-builder"));
                 assert_eq!(credential, None);
             }
@@ -1407,20 +1407,20 @@ argv = ["site-builder", "exec"]
 }
 
 #[test]
-fn rejects_empty_agent_forge() {
+fn rejects_empty_agent_forge_type() {
     let error = Config::from_str(
         r#"
 [[agents]]
 name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 methodology_dir = "../groundwork"
-forge = ""
+forge_type = ""
 
 [agents.command]
 argv = ["site-builder", "exec"]
 "#,
     )
-    .expect_err("empty forge values should be rejected");
+    .expect_err("empty forge type values should be rejected");
 
     match error {
         ConfigError::EmptyField {
@@ -1428,7 +1428,7 @@ argv = ["site-builder", "exec"]
             agent,
             credential,
         } => {
-            assert_eq!(field, "forge");
+            assert_eq!(field, "forge_type");
             assert_eq!(agent.as_deref(), Some("site-builder"));
             assert_eq!(credential, None);
         }
