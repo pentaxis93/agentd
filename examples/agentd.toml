@@ -16,6 +16,9 @@ name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
+# Optional active forge tag injected as GROUNDWORK_FORGE for Groundwork.
+# Defaults to "github" when omitted.
+#forge = "github"
 # Default repository URL cloned for manual runs when `agentd run` omits a repo,
 # and for each scheduled run of this agent.
 repo = "https://github.com/pentaxis93/agentd.git"

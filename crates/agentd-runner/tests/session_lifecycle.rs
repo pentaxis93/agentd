@@ -135,6 +135,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec![
                 "site-builder".to_string(),
@@ -190,6 +191,7 @@ fn materializes_request_text_input_before_session_command_runs() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -237,6 +239,7 @@ fn materializes_generic_artifact_input_before_session_command_runs() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -287,6 +290,7 @@ fn rejects_request_text_when_methodology_declares_an_unsupported_request_version
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: Vec::new(),
@@ -331,6 +335,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -383,6 +388,7 @@ fn clears_inherited_work_unit_when_invocation_omits_it() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -427,6 +433,7 @@ fn returns_failed_exit_code_without_timeout_and_cleans_up_container() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -477,6 +484,7 @@ fn returns_failed_exit_code_125_without_timeout_and_cleans_up_runner_resources()
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -528,6 +536,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -588,6 +597,7 @@ fn validates_read_only_additional_mounts_from_paths_containing_commas() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
                 target: PathBuf::from("/home/readonly-mount-run/.claude"),
@@ -657,6 +667,7 @@ fn preserves_host_writes_through_read_write_additional_mounts() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
                 target: PathBuf::from("/home/readwrite-mount-run/.runa"),
@@ -730,6 +741,7 @@ fn preserves_writable_home_for_nested_additional_mount_parents() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
                 target: PathBuf::from("/home/nested-home-mount-run/.config/claude"),
@@ -781,6 +793,7 @@ fn preserves_session_user_access_to_preexisting_home_content() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -823,6 +836,7 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -921,6 +935,7 @@ fn persists_session_transcript_under_agentd_audit_dir() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -991,6 +1006,7 @@ fn finalizes_session_after_runtime_restricts_transcript_directory_permissions() 
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -1065,6 +1081,7 @@ fn finalizes_session_after_runtime_restricts_events_jsonl_permissions() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -1139,6 +1156,7 @@ fn preserves_host_readability_for_restrictive_container_written_audit_entries_af
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -1238,6 +1256,7 @@ fn refuses_hard_linked_audit_entries_without_mutating_operator_mount_file_modes(
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: audit_root.clone(),
+            forge: "github".to_string(),
             mounts: vec![BindMount {
                 source: host_mount.clone(),
                 target: PathBuf::from("/home/audit-hard-link-run/shared"),
@@ -1316,6 +1335,7 @@ fn preserves_failing_audit_trail_for_post_mortem_reconstruction() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
@@ -1383,6 +1403,7 @@ fn times_out_when_a_timeout_is_provided_and_cleans_up_container() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![
@@ -1435,6 +1456,7 @@ fn releases_session_secret_after_container_reaches_running_state() {
                 base_image: image,
                 methodology_dir,
                 audit_root: audit_root.clone(),
+                forge: "github".to_string(),
                 mounts: Vec::new(),
                 agent_command: vec!["site-builder".to_string(), "exec".to_string()],
                 environment: vec![
@@ -1493,6 +1515,7 @@ fn clones_ssh_repo_with_agent_scoped_mounted_identity() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: vec![BindMount {
                 source: ssh_dir,
                 target: PathBuf::from("/home/ssh-clone-run/.ssh"),
@@ -1540,6 +1563,7 @@ fn ssh_repo_clone_cannot_use_another_agents_unmounted_identity() {
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
+            forge: "github".to_string(),
             mounts: Vec::new(),
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: Vec::new(),

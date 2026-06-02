@@ -49,8 +49,8 @@ explicit override for root-owned installs such as `/var/lib/tesserine/audit/`.
 ## Configuration
 
 An agent is a named environment specification: base image, methodology
-directory, optional additional bind mounts, optional default repo, optional
-cron schedule, credentials, and exact command argv. Define agents in a TOML
+directory, optional active forge, optional additional bind mounts, optional
+default repo, optional cron schedule, credentials, and exact command argv. Define agents in a TOML
 config file — start from
 [`examples/agentd.toml`](examples/agentd.toml):
 
@@ -73,6 +73,9 @@ name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
+# Optional active forge tag injected as GROUNDWORK_FORGE for Groundwork.
+# Defaults to "github" when omitted.
+#forge = "github"
 # Default repository URL cloned for manual runs when `agentd run` omits a repo,
 # and for every scheduled run of this agent. HTTPS, HTTP, git://, ssh://, and
 # user@host:path SSH forms are accepted.
@@ -138,9 +141,11 @@ relabelled by Podman from their canonical host source paths. The base image
 must provide `/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, `runa`,
 and whatever binaries the declared agent command uses. SSH repository clone
 also requires an OpenSSH-compatible client in the base image. UID/GID `1000`
-must be available for the session user. When an agent declares `schedule`, it must also
-declare `repo`. Schedules are evaluated in daemon-local time and missed fires
-are not backfilled after downtime. Persistent audit records default to
+must be available for the session user. The optional `forge` value declares one
+active forge for each session and is injected as `GROUNDWORK_FORGE`; when
+omitted, agentd injects `github`. When an agent declares `schedule`, it must
+also declare `repo`. Schedules are evaluated in daemon-local time and missed
+fires are not backfilled after downtime. Persistent audit records default to
 `$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set
 `daemon.audit_root` to override that for system installations.
 
@@ -320,6 +325,7 @@ the container, the agent sees:
 - A runner-managed read-only invocation-input mount at `/agentd/invocation-input` when manual input is supplied
 - Any operator-declared additional bind mounts, read-only or read-write per agent
 - Credentials injected as environment variables
+- `GROUNDWORK_FORGE` with the configured active forge, defaulting to `github`
 - `AGENTD_WORK_UNIT` when the invocation includes one
 - A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `--request` or `--artifact-file`
 - `runa init` state followed by `runa run --agent-command -- <argv>` from the repo directory

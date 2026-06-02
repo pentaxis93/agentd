@@ -1207,6 +1207,30 @@ fn run_session_injects_empty_environment_values_via_direct_env_args() {
 }
 
 #[test]
+fn run_session_injects_active_forge_as_groundwork_forge_environment() {
+    let _guard = fake_podman_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let fixture = FakePodmanFixture::new();
+    fixture.install(&FakePodmanScenario::new());
+
+    let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+    let outcome = fixture.run_with_fake_podman(crate::SessionSpec {
+        methodology_dir,
+        forge: "sourcehut".to_string(),
+        ..test_session_spec()
+    });
+
+    assert_eq!(
+        outcome.expect("session should succeed with fake podman"),
+        SessionOutcome::Success { exit_code: 0 }
+    );
+
+    let create_args = fixture.create_args();
+    assert!(create_args.contains("--env GROUNDWORK_FORGE=sourcehut"));
+}
+
+#[test]
 fn run_session_reuses_one_session_identifier_for_container_stage_and_secret_names() {
     let _guard = fake_podman_lock()
         .lock()

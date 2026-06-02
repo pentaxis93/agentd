@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
+const GROUNDWORK_FORGE_ENV: &str = "GROUNDWORK_FORGE";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
 pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 pub(crate) const TRANSCRIPT_DIR_ENV: &str = "RUNA_TRANSCRIPT_DIR";
@@ -39,6 +40,11 @@ pub(crate) fn validate_spec(spec: &SessionSpec) -> Result<(), RunnerError> {
     if !spec.audit_root.is_absolute() {
         return Err(RunnerError::InvalidAuditRoot {
             path: spec.audit_root.clone(),
+        });
+    }
+    if spec.forge.trim().is_empty() || spec.forge != spec.forge.trim() {
+        return Err(RunnerError::InvalidForge {
+            forge: spec.forge.clone(),
         });
     }
     if spec.agent_command.is_empty() || spec.agent_command.iter().any(|arg| arg.is_empty()) {
@@ -164,8 +170,8 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 /// Validates an environment variable name against naming rules.
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
-/// runner-managed names such as `AGENT_NAME`, `AGENTD_WORK_UNIT`,
-/// `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`, and
+/// runner-managed names such as `AGENT_NAME`, `GROUNDWORK_FORGE`,
+/// `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`, and
 /// `RUNA_TRANSCRIPT_REDACT_ENV`. Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
 /// configuration layer for credential name validation.
@@ -224,8 +230,11 @@ pub fn validate_repo_url(repo_url: &str) -> Result<(), RunnerError> {
 ///
 /// These names are reserved — callers cannot use them in
 /// [`SessionSpec::environment`] because the runner injects them directly.
-pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 1] {
-    [(AGENT_NAME_ENV, &spec.agent_name)]
+pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 2] {
+    [
+        (AGENT_NAME_ENV, &spec.agent_name),
+        (GROUNDWORK_FORGE_ENV, &spec.forge),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,6 +372,7 @@ fn is_reserved_environment_name(name: &str) -> bool {
     matches!(
         name,
         AGENT_NAME_ENV
+            | GROUNDWORK_FORGE_ENV
             | WORK_UNIT_ENV
             | REPO_TOKEN_ENV
             | TRANSCRIPT_DIR_ENV
@@ -476,6 +486,7 @@ mod tests {
     fn validate_spec_rejects_reserved_environment_names() {
         for reserved_name in [
             "AGENT_NAME",
+            "GROUNDWORK_FORGE",
             WORK_UNIT_ENV,
             REPO_TOKEN_ENV,
             "RUNA_TRANSCRIPT_DIR",
@@ -523,6 +534,31 @@ mod tests {
             assert!(
                 matches!(error, RunnerError::InvalidDaemonInstanceId),
                 "expected InvalidDaemonInstanceId for {daemon_instance_id:?}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_spec_rejects_empty_or_whitespace_padded_forge() {
+        for forge in ["", " ", " sourcehut", "sourcehut "] {
+            let error = validate_spec(&SessionSpec {
+                forge: forge.to_string(),
+                ..test_session_spec()
+            })
+            .expect_err("forge values must be non-empty and trimmed");
+
+            match &error {
+                RunnerError::InvalidForge {
+                    forge: invalid_forge,
+                } => {
+                    assert_eq!(invalid_forge, forge);
+                }
+                other => panic!("expected InvalidForge, got {other:?}"),
+            }
+
+            assert!(
+                error.to_string().contains("forge"),
+                "invalid forge error should explain forge validation: {error}"
             );
         }
     }
