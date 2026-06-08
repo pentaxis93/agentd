@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agent configuration now accepts an optional `forge_type` field and injects the
   selected forge type as `GROUNDWORK_FORGE_TYPE`, defaulting omitted values to `github`.
 
+### Changed
+
+- Deployment and architecture documentation no longer names a specific
+  operator host when describing supported single-tenant deployment tradeoffs.
+
 ## [0.1.2] — 2026-05-17
 ### Fixed
 
