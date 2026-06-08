@@ -337,9 +337,9 @@ running, agentd opens the mounted `runa/` subtree with mode `0o777` so writes
 through the session user's mapped daemon identity succeed. Any user with host
 shell access can therefore read or write that subtree during the active
 session. On completion, agentd seals directories to `0555` and non-symlink
-entries to `0444`, making finished records world-readable on the host. For
-single-tenant deployments such as babbie, that tradeoff is acceptable; a
-multi-tenant host would need a different permission model before deployment.
+entries to `0444`, making finished records world-readable on the host. That
+tradeoff is acceptable only for single-tenant deployments; a multi-tenant host
+would need a different permission model before deployment.
 
 The startup audit-root probe is intentionally local-filesystem scoped. It
 verifies that the daemon can create, chmod, restore, and remove daemon-owned
