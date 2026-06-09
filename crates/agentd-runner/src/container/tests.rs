@@ -524,6 +524,39 @@ fn build_container_script_materializes_invocation_input_without_audit_workspace_
 }
 
 #[test]
+fn build_container_script_materializes_work_unit_input_before_work_mode_run() {
+    let script = build_container_script(
+        &crate::SessionSpec {
+            agent_name: "myagent".to_string(),
+            ..test_session_spec()
+        },
+        &SessionInvocation {
+            repo_url: VALID_REMOTE_REPO_URL.to_string(),
+            repo_token: None,
+            work_unit: Some("issue-76".to_string()),
+            input: None,
+            timeout: None,
+        },
+        Some(&ResolvedInvocationInput {
+            artifact_type: "work-unit".to_string(),
+            artifact_id: "issue-76".to_string(),
+            document_json: "{}\n".to_string(),
+        }),
+    );
+
+    let materialize_offset = script
+        .find("workspace/work-unit")
+        .expect("script should materialize the work-unit artifact");
+    let run_offset = script
+        .find("runa run --work-unit 'issue-76'")
+        .expect("script should run the selected work unit");
+    assert!(
+        materialize_offset < run_offset,
+        "work-unit artifact should be materialized before work-mode run: {script}"
+    );
+}
+
+#[test]
 fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_targets() {
     let script = build_container_script(
         &crate::SessionSpec {

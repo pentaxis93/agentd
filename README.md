@@ -264,7 +264,7 @@ Trigger a session through the running daemon:
 agentd run site-builder --work-unit issue-42
 ```
 
-Manual invocation supports exactly one intent surface at a time:
+Manual invocation supports intake-mode and work-mode surfaces:
 
 - `--work-unit <ID>` targets existing queued work
 - `--request <TEXT>` synthesizes a canonical request artifact at
@@ -272,7 +272,17 @@ Manual invocation supports exactly one intent surface at a time:
 - `--artifact-type <TYPE> --artifact-file <PATH>` validates and places a
   complete JSON artifact at `.runa/workspace/<TYPE>/<file-stem>.json`
 
-`--work-unit`, `--request`, and `--artifact-file` are mutually exclusive.
+`--request` is intake mode and is mutually exclusive with `--work-unit` and
+`--artifact-file`. To start work mode from an operator-supplied work-unit
+artifact, combine the selected work-unit id with a matching `work-unit` artifact
+file:
+
+```bash
+agentd run site-builder --work-unit issue-42 --artifact-type work-unit --artifact-file ./issue-42.json
+```
+
+The file stem becomes the artifact id, so the file stem must match
+`--work-unit`.
 
 `agentd run` does not read `agentd.toml`. The client connects to the daemon by
 either:
@@ -312,6 +322,7 @@ Examples:
 ```bash
 agentd run site-builder --request "Add a status page"
 agentd run site-builder --artifact-type claim --artifact-file ./claim.json
+agentd run site-builder --work-unit issue-42 --artifact-type work-unit --artifact-file ./issue-42.json
 agentd run site-builder https://github.com/pentaxis93/agentd.git --request "Review the last release candidate"
 ```
 

@@ -106,21 +106,20 @@ enum Command {
     /// Start the foreground daemon.
     Daemon(DaemonArgs),
     /// Trigger a manual session through the running daemon.
-    #[command(display_name = "agentd")]
+    #[command(
+        display_name = "agentd",
+        after_help = "Work-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
+    )]
     Run {
         agent: String,
         repo: Option<String>,
         #[arg(long)]
         socket_path: Option<PathBuf>,
-        #[arg(long, conflicts_with_all = ["request", "artifact_file"])]
+        #[arg(long, conflicts_with = "request")]
         work_unit: Option<String>,
         #[arg(long, conflicts_with_all = ["work_unit", "artifact_file"])]
         request: Option<String>,
-        #[arg(
-                long,
-                requires = "artifact_type",
-                conflicts_with_all = ["work_unit", "request"]
-            )]
+        #[arg(long, requires = "artifact_type", conflicts_with = "request")]
         artifact_file: Option<PathBuf>,
         #[arg(long, requires = "artifact_file")]
         artifact_type: Option<String>,

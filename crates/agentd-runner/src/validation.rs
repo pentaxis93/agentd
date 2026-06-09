@@ -10,8 +10,8 @@ use crate::input::INVOCATION_INPUT_MOUNT_PATH;
 use crate::naming::is_daemon_instance_id;
 use crate::session_paths::{session_home_dir, session_internal_agentd_dir, session_repo_dir};
 use crate::types::{
-    AgentNameValidationError, BindMount, EnvironmentNameValidationError, MountOverlapError,
-    MountTargetValidationError, RunnerError, SessionInvocation, SessionSpec,
+    AgentNameValidationError, BindMount, EnvironmentNameValidationError, InvocationInput,
+    MountOverlapError, MountTargetValidationError, RunnerError, SessionInvocation, SessionSpec,
 };
 use std::collections::HashSet;
 use std::path::Path;
@@ -158,13 +158,41 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
     {
         return Err(repo_token_requires_https_error());
     }
-    if invocation.work_unit.is_some() && invocation.input.is_some() {
-        return Err(RunnerError::InvalidInvocationInput {
-            message: "manual invocation must specify at most one of work_unit or input".to_string(),
-        });
+    if let Some(work_unit) = &invocation.work_unit {
+        if let Some(input) = &invocation.input {
+            validate_work_mode_input(work_unit, input)?;
+        }
     }
 
     Ok(())
+}
+
+fn validate_work_mode_input(work_unit: &str, input: &InvocationInput) -> Result<(), RunnerError> {
+    match input {
+        InvocationInput::RequestText { .. } => Err(RunnerError::InvalidInvocationInput {
+            message: "manual invocation cannot combine work_unit with request input".to_string(),
+        }),
+        InvocationInput::Artifact {
+            artifact_type,
+            artifact_id,
+            ..
+        } => {
+            if artifact_type != "work-unit" {
+                return Err(RunnerError::InvalidInvocationInput {
+                    message: "manual work-mode artifact input must use artifact type 'work-unit'"
+                        .to_string(),
+                });
+            }
+            if artifact_id != work_unit {
+                return Err(RunnerError::InvalidInvocationInput {
+                    message: format!(
+                        "manual work-mode artifact id must match work_unit '{work_unit}'"
+                    ),
+                });
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Validates an environment variable name against naming rules.
@@ -1532,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_invocation_accepts_zero_or_one_manual_intent_surface() {
+    fn validate_invocation_accepts_supported_manual_intent_surfaces() {
         for (work_unit, input) in [
             (None, None),
             (Some("issue-42".to_string()), None),
@@ -1540,6 +1568,14 @@ mod tests {
                 None,
                 Some(InvocationInput::RequestText {
                     description: "Add a status page".to_string(),
+                }),
+            ),
+            (
+                Some("issue-42".to_string()),
+                Some(InvocationInput::Artifact {
+                    artifact_type: "work-unit".to_string(),
+                    artifact_id: "issue-42".to_string(),
+                    document: serde_json::json!({ "id": "issue-42" }),
                 }),
             ),
         ] {
@@ -1550,12 +1586,12 @@ mod tests {
                 input,
                 timeout: None,
             })
-            .expect("zero or one manual intent surface should be accepted");
+            .expect("supported manual intent surfaces should be accepted");
         }
     }
 
     #[test]
-    fn validate_invocation_rejects_conflicting_manual_intent_surfaces() {
+    fn validate_invocation_rejects_request_text_with_work_unit() {
         let error = validate_invocation(&SessionInvocation {
             repo_url: "https://example.com/agentd.git".to_string(),
             repo_token: None,
@@ -1579,6 +1615,58 @@ mod tests {
         assert!(
             message.contains("input"),
             "expected input guidance in message, got {message}"
+        );
+    }
+
+    #[test]
+    fn validate_invocation_rejects_non_work_unit_artifact_with_work_unit() {
+        let error = validate_invocation(&SessionInvocation {
+            repo_url: "https://example.com/agentd.git".to_string(),
+            repo_token: None,
+            work_unit: Some("issue-42".to_string()),
+            input: Some(InvocationInput::Artifact {
+                artifact_type: "claim".to_string(),
+                artifact_id: "issue-42".to_string(),
+                document: serde_json::json!({ "summary": "Ship it" }),
+            }),
+            timeout: None,
+        })
+        .expect_err("work mode should reject non-work-unit artifacts");
+
+        assert!(
+            matches!(error, RunnerError::InvalidInvocationInput { .. }),
+            "expected InvalidInvocationInput, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("artifact type 'work-unit'"),
+            "expected work-unit artifact guidance in message, got {message}"
+        );
+    }
+
+    #[test]
+    fn validate_invocation_rejects_mismatched_work_unit_artifact_id() {
+        let error = validate_invocation(&SessionInvocation {
+            repo_url: "https://example.com/agentd.git".to_string(),
+            repo_token: None,
+            work_unit: Some("issue-42".to_string()),
+            input: Some(InvocationInput::Artifact {
+                artifact_type: "work-unit".to_string(),
+                artifact_id: "issue-43".to_string(),
+                document: serde_json::json!({ "id": "issue-43" }),
+            }),
+            timeout: None,
+        })
+        .expect_err("work mode should reject mismatched work-unit artifacts");
+
+        assert!(
+            matches!(error, RunnerError::InvalidInvocationInput { .. }),
+            "expected InvalidInvocationInput, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("artifact id") && message.contains("issue-42"),
+            "expected matching-id guidance in message, got {message}"
         );
     }
 

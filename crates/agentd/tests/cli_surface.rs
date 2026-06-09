@@ -428,6 +428,10 @@ fn binary_run_help_shows_socket_path_and_not_config() {
         !stdout.contains("--config"),
         "run help should not advertise daemon config coupling: {stdout}"
     );
+    assert!(
+        stdout.contains("--work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"),
+        "run help should document work-mode artifact invocation: {stdout}"
+    );
 }
 
 #[test]
@@ -869,6 +873,78 @@ fn binary_run_command_reads_artifact_file_and_forwards_structured_input() {
             document: json!({
                 "description": "Add a status page",
                 "source": "operator",
+            }),
+        })
+    );
+}
+
+#[test]
+fn binary_run_command_forwards_work_unit_with_matching_artifact_file() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-work-unit-artifact-input-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-work-unit-artifact-input",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+    let artifact_path = runtime_dir.join("issue-76.json");
+    std::fs::write(
+        &artifact_path,
+        r#"{"id":"issue-76","title":"Execute work mode"}"#,
+    )
+    .expect("artifact file should be written");
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "run",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
+            "site-builder",
+            "https://example.com/repo.git",
+            "--work-unit",
+            "issue-76",
+            "--artifact-type",
+            "work-unit",
+            "--artifact-file",
+            artifact_path
+                .to_str()
+                .expect("artifact path should be utf-8"),
+        ])
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "run command should succeed with work-unit artifact input: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(invocation.work_unit.as_deref(), Some("issue-76"));
+    assert_eq!(
+        invocation.input,
+        Some(InvocationInput::Artifact {
+            artifact_type: "work-unit".to_string(),
+            artifact_id: "issue-76".to_string(),
+            document: json!({
+                "id": "issue-76",
+                "title": "Execute work mode",
             }),
         })
     );
