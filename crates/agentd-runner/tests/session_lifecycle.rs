@@ -115,6 +115,26 @@ fn install_claim_schema(path: &Path) {
     .expect("claim schema should be written");
 }
 
+fn install_work_unit_schema(path: &Path) {
+    let schema_dir = path.join("schemas");
+    fs::create_dir_all(&schema_dir).expect("schema dir should be created");
+    fs::write(
+        schema_dir.join("work-unit.schema.json"),
+        r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["id", "title"],
+  "additionalProperties": true,
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 }
+  }
+}
+"#,
+    )
+    .expect("work-unit schema should be written");
+}
+
 #[test]
 fn succeeds_without_timeout_and_cleans_up_container() {
     if skip_if_podman_unavailable("succeeds_without_timeout_and_cleans_up_container") {
@@ -262,6 +282,106 @@ fn materializes_generic_artifact_input_before_session_command_runs() {
     .expect("session should run");
 
     assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    fixture.assert_no_runner_container_left_behind();
+    fixture.assert_no_runner_secret_left_behind();
+}
+
+#[test]
+fn executes_work_mode_against_injected_work_unit_artifact() {
+    if skip_if_podman_unavailable("executes_work_mode_against_injected_work_unit_artifact") {
+        return;
+    }
+    let _guard = podman_test_lock()
+        .lock()
+        .expect("podman test lock should be acquired");
+
+    let fixture = SessionFixture::new("work-mode-artifact-run");
+    write_methodology_manifest(&fixture.methodology_dir(), &["work-unit"]);
+    install_work_unit_schema(&fixture.methodology_dir());
+    let image = fixture.build_image();
+
+    let outcome = run_session_with_test_audit_root(
+        &fixture.audit_root(),
+        SessionSpec {
+            daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
+            agent_name: "work-mode-artifact-run".to_string(),
+            base_image: image,
+            methodology_dir: fixture.methodology_dir(),
+            audit_root: fixture.audit_root(),
+            forge_type: "github".to_string(),
+            mounts: Vec::new(),
+            agent_command: vec!["site-builder".to_string(), "exec".to_string()],
+            environment: vec![ResolvedEnvironmentVariable {
+                name: "SESSION_TEST_BEHAVIOR".to_string(),
+                value: "execute-work-mode-cascade".to_string(),
+            }],
+        },
+        SessionInvocation {
+            repo_url: fixture.repo_url(),
+            repo_token: None,
+            work_unit: Some("issue-76".to_string()),
+            input: Some(InvocationInput::Artifact {
+                artifact_type: "work-unit".to_string(),
+                artifact_id: "issue-76".to_string(),
+                document: serde_json::json!({
+                    "id": "issue-76",
+                    "title": "Execute work mode",
+                }),
+            }),
+            timeout: None,
+        },
+    )
+    .expect("work-mode session should run");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+    let record_dir = fixture.only_session_record_dir();
+    assert_eq!(
+        fs::read_to_string(record_dir.join("runa/calls.log"))
+            .expect("runa call log should persist"),
+        "init --methodology /agentd/methodology/manifest.toml\nrun --work-unit issue-76 --agent-command -- site-builder exec\n"
+    );
+    assert!(
+        record_dir
+            .join("runa/workspace/work-unit/issue-76.json")
+            .exists(),
+        "injected work-unit artifact should persist"
+    );
+    for artifact_path in [
+        "runa/workspace/behavior-contract/specify.json",
+        "runa/workspace/implementation-plan/plan.json",
+        "runa/workspace/patch/implement.json",
+        "runa/workspace/test-evidence/verify.json",
+        "runa/workspace/documentation-record/document.json",
+        "runa/workspace/completion-record/submit.json",
+        "runa/workspace/completion-record/land.json",
+    ] {
+        assert!(
+            record_dir.join(artifact_path).exists(),
+            "expected cascade artifact {artifact_path} to persist"
+        );
+    }
+    let execution_record = fs::read_to_string(record_dir.join("runa/store/executions/0001.json"))
+        .expect("execution record should persist");
+    assert!(execution_record.contains("\"specify\""));
+    assert!(execution_record.contains("\"land\""));
+
+    let metadata: Value = serde_json::from_str(
+        &fs::read_to_string(record_dir.join("agentd/session.json"))
+            .expect("session metadata should persist"),
+    )
+    .expect("session metadata should be valid json");
+    assert_eq!(metadata["work_unit"], "issue-76");
+    assert_eq!(metadata["outcome"], "success");
+    assert_eq!(metadata["exit_code"], 0);
+
+    let transcript_manifest: Value = serde_json::from_str(
+        &fs::read_to_string(record_dir.join("agentd/transcript/manifest.json"))
+            .expect("transcript manifest should persist"),
+    )
+    .expect("transcript manifest should be valid json");
+    assert_eq!(transcript_manifest["coverage"], "full");
+
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -2554,6 +2674,32 @@ case "$command_name" in
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "assert-claim-input-present" ]; then
             [ -f "${HOME}/repo/.runa/workspace/claim/claim.json" ]
             grep -F '"summary":"Ship it"' "${HOME}/repo/.runa/workspace/claim/claim.json"
+            exit 0
+        fi
+
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "execute-work-mode-cascade" ]; then
+            [ "${AGENTD_WORK_UNIT:-}" = "issue-76" ]
+            [ -f "${HOME}/repo/.runa/workspace/work-unit/issue-76.json" ]
+            grep -F '"id":"issue-76"' "${HOME}/repo/.runa/workspace/work-unit/issue-76.json"
+            mkdir -p \
+                "${HOME}/repo/.runa/workspace/behavior-contract" \
+                "${HOME}/repo/.runa/workspace/implementation-plan" \
+                "${HOME}/repo/.runa/workspace/patch" \
+                "${HOME}/repo/.runa/workspace/test-evidence" \
+                "${HOME}/repo/.runa/workspace/documentation-record" \
+                "${HOME}/repo/.runa/workspace/completion-record" \
+                "${HOME}/repo/.runa/store/executions"
+            printf '{"scenario":"Given a work-unit artifact, when work mode starts, then specify runs"}\n' > "${HOME}/repo/.runa/workspace/behavior-contract/specify.json"
+            printf '{"decision":"execute the injected work-unit through work mode"}\n' > "${HOME}/repo/.runa/workspace/implementation-plan/plan.json"
+            printf '{"status":"implemented"}\n' > "${HOME}/repo/.runa/workspace/patch/implement.json"
+            printf '{"status":"verified"}\n' > "${HOME}/repo/.runa/workspace/test-evidence/verify.json"
+            printf '{"status":"documented"}\n' > "${HOME}/repo/.runa/workspace/documentation-record/document.json"
+            printf '{"status":"submitted"}\n' > "${HOME}/repo/.runa/workspace/completion-record/submit.json"
+            printf '{"status":"landed"}\n' > "${HOME}/repo/.runa/workspace/completion-record/land.json"
+            printf '{"events":[{"protocol":"specify","artifact":"behavior-contract","postcondition":"passed"},{"protocol":"plan","artifact":"implementation-plan","postcondition":"passed"},{"protocol":"implement","artifact":"patch","postcondition":"passed"},{"protocol":"verify","artifact":"test-evidence","postcondition":"passed"},{"protocol":"document","artifact":"documentation-record","postcondition":"passed"},{"protocol":"submit","artifact":"completion-record","postcondition":"passed"},{"protocol":"land","artifact":"completion-record","postcondition":"passed"}]}\n' > "${HOME}/repo/.runa/store/executions/0001.json"
+            if [ -n "${RUNA_TRANSCRIPT_DIR:-}" ]; then
+                printf '{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"take"}\n' >> "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
+            fi
             exit 0
         fi
 

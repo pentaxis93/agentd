@@ -101,7 +101,7 @@ pub enum InvocationInput {
 /// Per-invocation parameters for a session launch.
 ///
 /// Describes the repository to clone, optional clone-only repository
-/// authentication, at most one manual intent surface (`work_unit` or `input`),
+/// authentication, optional work-mode target and materialized invocation input,
 /// and an optional timeout. Validated by [`run_session`](crate::run_session)
 /// before any resources are allocated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,12 +118,12 @@ pub struct SessionInvocation {
     /// Optional work unit identifier passed to `runa run --work-unit` and
     /// exposed through the runner-managed `AGENTD_WORK_UNIT` environment
     /// variable when set.
-    /// Mutually exclusive with [`Self::input`].
     pub work_unit: Option<String>,
     /// Optional operator-supplied input to materialize into the repo
     /// workspace after `runa init` and before `runa run`. Artifact names supplied
     /// through [`InvocationInput::Artifact`] must each be a single path
-    /// segment. Mutually exclusive with [`Self::work_unit`].
+    /// segment. When combined with [`Self::work_unit`], the input must be a
+    /// `work-unit` artifact whose id matches the work unit.
     pub input: Option<InvocationInput>,
     /// Optional session timeout. When set, the runner force-removes the
     /// container after this duration and returns

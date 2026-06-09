@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenSSH material, including `ssh://` and `user@host:path` repository URLs.
 - Agent configuration now accepts an optional `forge_type` field and injects the
   selected forge type as `GROUNDWORK_FORGE_TYPE`, defaulting omitted values to `github`.
+- `agentd run` now supports work-mode invocation from a matching supplied
+  `work-unit` artifact, using `--work-unit <ID> --artifact-type work-unit
+  --artifact-file <ID>.json`.
 
 ### Changed
 
