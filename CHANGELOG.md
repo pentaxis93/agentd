@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- `docs/environment.md` — environment-variable reference covering the
+  daemon-process, session-injection, and test-only scopes.
+- `AGENTS.md` Build and Test section: MSRV, the cargo loop, and where the
+  integration tests live.
 - `docs/quickstart.md` — end-to-end tutorial from image build through a
   completed session to the sealed audit record, using the canonical
   example-hello integration request.

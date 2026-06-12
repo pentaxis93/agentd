@@ -390,6 +390,8 @@ schedule evaluation: the next occurrence runs at its next scheduled time.
   semantics. The supported surface for inspecting what a session did.
 - **[docs/socket-protocol.md](docs/socket-protocol.md)** — daemon socket wire
   format (internal, unversioned in `v0.1.x`).
+- **[docs/environment.md](docs/environment.md)** — every environment variable
+  the daemon reads or injects, by scope.
 
 ## License
 
