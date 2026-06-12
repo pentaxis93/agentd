@@ -56,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- README hero rewritten for the ecosystem README pass: positions agentd as
+  the daemon for running autonomous agents like production workloads, with
+  the isolation, credential-lifetime, and sealed-evidence guarantees stated
+  with their proof links. All contract-bearing statements (same-build socket
+  policy, socket resolution, audit root) preserved verbatim.
+
 - Deployment and architecture documentation no longer names a specific
   operator host when describing supported single-tenant deployment tradeoffs.
 
