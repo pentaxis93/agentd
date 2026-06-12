@@ -169,13 +169,17 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 ///
 /// Privilege model: the script starts as root (UID 0) for privileged setup —
 /// creating the agent's unix user, recursively re-owning pre-existing home
-/// content while preserving host-backed mount targets, cloning the
-/// repository, and transferring repository ownership. Every workload step
-/// (clone included) runs through `gosu <agent>`, and the final command is
-/// `exec gosu <agent> …`, so the drop to the unprivileged session user is
-/// permanent — no root process remains to return to. `set -eu` at the top
-/// aborts on any setup failure rather than continuing with a broken
-/// workspace.
+/// content while preserving host-backed mount targets, and, for HTTP(S)
+/// repository URLs, running the clone itself as root: the repo token is
+/// captured into a shell variable, `AGENTD_REPO_TOKEN` is unset immediately,
+/// and the value is passed only as a one-shot `http.extraHeader` for that
+/// single `git clone` (`build_clone_command`). SSH clones instead run as the
+/// agent via `gosu` with `HOME` set so OpenSSH reads the mounted identity.
+/// After a root clone, repository ownership is transferred to the agent
+/// user. The final command is `exec gosu <agent> …`, so the drop to the
+/// unprivileged session user is permanent for the agent workload — no root
+/// process remains to return to. `set -eu` at the top aborts on any setup
+/// failure rather than continuing with a broken workspace.
 fn build_container_script(
     spec: &SessionSpec,
     invocation: &SessionInvocation,

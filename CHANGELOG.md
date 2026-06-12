@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical in commons, and no repo is the tooling upstream.
 
 - Invariant-level documentation next to security-critical code: `audit.rs`
-  gains a module contract (lifecycle, sealing invariants, symlink no-follow,
+  gains a module contract (lifecycle, sealing invariants, symlink skipping,
   multi-link refusal, atomic metadata publish) with doc comments tying the
   sealing constants and lifecycle functions to the security model;
   `protocol.rs` documents the socket message enums and links the outcome

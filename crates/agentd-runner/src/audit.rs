@@ -22,10 +22,14 @@
 //! Sealing is the security boundary between "session may still write" and
 //! "record is evidence". The invariants the sealing path enforces:
 //!
-//! - **Symlinks are never followed.** Inspection uses `symlink_metadata`,
-//!   chmod uses `fchmodat(AT_SYMLINK_NOFOLLOW)`, and symlink entries are
-//!   skipped, so session-written links cannot redirect a daemon-privileged
-//!   chmod outside the record.
+//! - **Symlink entries are skipped, never sealed.** Every walk inspects
+//!   with `symlink_metadata` and skips symlinks; the sealing chmods are
+//!   plain `fs::set_permissions` calls made only on paths that inspection
+//!   found non-symlink. This check-then-chmod sequence is safe because
+//!   finalization runs after the session container has exited — no live
+//!   writer can swap a path between the check and the chmod. (Transcript
+//!   permission repair additionally uses `fchmodat(AT_SYMLINK_NOFOLLOW)`;
+//!   see `set_owner_permissions_no_follow`.)
 //! - **Multi-linked files are refused, not sealed.** A regular file with
 //!   `nlink > 1` aborts finalization (`preflight_validate_sealable_tree`):
 //!   chmod acts on the inode, so sealing a hardlink would mutate a file

@@ -26,7 +26,7 @@ only the environment.
 | `AGENT_NAME` | the agent's configured name | session tooling |
 | `GROUNDWORK_FORGE_TYPE` | `forge_type` from agent config, defaulting to `github` | groundwork forge mechanics |
 | `AGENTD_WORK_UNIT` | the `--work-unit` identifier, when present | session tooling |
-| `AGENTD_REPO_TOKEN` | the resolved repo token, when configured | repository clone/push |
+| `AGENTD_REPO_TOKEN` | the resolved repo token, when configured | the generated clone step only: consumed for the one HTTPS `git clone` and unset before the agent command runs — it cannot authorize pushes. HTTPS pushes need a credential delivered via `[[agents.credentials]]`; SSH pushes use the mounted `.ssh` identity |
 | `RUNA_TRANSCRIPT_DIR` | the mounted transcript directory | runa / runa-mcp transcript emission |
 | `RUNA_TRANSCRIPT_REDACT_ENV` | names of session env vars whose values must be redacted from transcripts | runa / runa-mcp |
 | credential `name` variables (e.g. `GITHUB_TOKEN`) | value of the corresponding daemon-side `source` variable, delivered via ephemeral podman secret | agent process |
