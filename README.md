@@ -380,6 +380,8 @@ schedule evaluation: the next occurrence runs at its next scheduled time.
   branch conventions. Read this before contributing.
 - **[examples/agentd.toml](examples/agentd.toml)** — annotated agent
   configuration. Starting point for writing your own.
+- **[docs/runbooks/](docs/runbooks/README.md)** — operator runbooks: equip an
+  agent SSH identity, provision session secrets, redeploy the daemon.
 
 ## License
 

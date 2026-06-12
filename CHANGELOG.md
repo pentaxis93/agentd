@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- Operator runbooks under `docs/runbooks/`: equip an agent SSH identity,
+  provision session secrets, and redeploy the daemon. Generic successors to
+  the runbooks retired with `tesserine/ops` (recoverable at ops commit
+  `c394550^`); host-specific deployment state remains with the operator's
+  host operations repository.
+
 - Runner setup now supports SSH repository clone through agent-scoped mounted
   OpenSSH material, including `ssh://` and `user@host:path` repository URLs.
 - Agent configuration now accepts an optional `forge_type` field and injects the
