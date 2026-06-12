@@ -373,6 +373,9 @@ schedule evaluation: the next occurrence runs at its next scheduled time.
 
 ## Going Deeper
 
+- **[docs/quickstart.md](docs/quickstart.md)** — end-to-end tutorial: build
+  the image, configure an agent, run the first session, inspect the sealed
+  audit record.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — session lifecycle phases, container
   isolation model, credential flow, and workspace crate boundaries. How the
   system is built and why.

@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- `docs/quickstart.md` — end-to-end tutorial from image build through a
+  completed session to the sealed audit record, using the canonical
+  example-hello integration request.
 - `SessionOutcome` documents commons/EXIT-CODES.md as the canonical home
   of its outcome vocabulary, with `TimedOut` identified as the one
   agentd-layer (caller-enforced timeout) addition.
