@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- `AGENTS.md` carries the canonical principles pointer
+  (`pentaxis93/principles`), matching the runa/groundwork entry-line
+  convention (#148).
 - `docs/environment.md` — environment-variable reference covering the
   daemon-process, session-injection, and test-only scopes.
 - `AGENTS.md` Build and Test section: MSRV, the cargo loop, and where the

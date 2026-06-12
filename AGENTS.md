@@ -1,5 +1,7 @@
 # AGENTS
 
+Principles: [pentaxis93/principles](https://github.com/pentaxis93/principles)
+
 ## Project Identity
 agentd is an autonomous AI agent runtime daemon for running autonomous AI agents on infrastructure you control. It is for builders and operators who need predictable, self-hosted execution of agent workflows without relying on hosted runtimes. The project is being built as a modular Rust workspace so runtime, scheduling, and integration concerns can evolve independently.
 
