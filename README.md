@@ -171,14 +171,14 @@ Repository release operations are described in [`RELEASING.md`](RELEASING.md).
 
 ```bash
 podman build \
-  --build-arg AGENTD_REF=v0.1.2-rc.1 \
-  --tag localhost/agentd:v0.1.2-rc.1 .
+  --build-arg AGENTD_REF=v0.1.2 \
+  --tag localhost/agentd:v0.1.2 .
 ```
 
 Confirm the deployed image metadata with:
 
 ```bash
-podman inspect localhost/agentd:v0.1.2-rc.1 | jq '.[0].Config.Labels'
+podman inspect localhost/agentd:v0.1.2 | jq '.[0].Config.Labels'
 ```
 
 The image's default command starts the daemon and reads
@@ -244,7 +244,7 @@ deployments.
 Confirm the image contents with:
 
 ```bash
-podman run --rm --entrypoint /usr/local/bin/agentd localhost/agentd:v0.1.2-rc.1 --version
+podman run --rm --entrypoint /usr/local/bin/agentd localhost/agentd:v0.1.2 --version
 ```
 
 ## Running a Session

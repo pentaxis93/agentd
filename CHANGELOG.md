@@ -65,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deployment and architecture documentation no longer names a specific
   operator host when describing supported single-tenant deployment tradeoffs.
 
+### Fixed
+
+- README deployment examples reference the released `v0.1.2` tag (they
+  were pinned to `v0.1.2-rc.1`).
+
 ## [0.1.2] — 2026-05-17
 ### Fixed
 
