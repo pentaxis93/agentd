@@ -132,6 +132,13 @@ pub struct SessionInvocation {
 }
 
 /// Terminal outcome of a completed session.
+///
+/// Labels and exit-code semantics implement the shared session-outcome
+/// vocabulary — canonical: commons/EXIT-CODES.md
+/// (<https://github.com/tesserine/commons/blob/main/EXIT-CODES.md>).
+/// agentd does not redefine them. `TimedOut` is the one agentd-layer
+/// addition: commons scopes caller-enforced timeout outside the shared
+/// vocabulary, and agentd is that caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionOutcome {
     /// The container process exited with code 0.

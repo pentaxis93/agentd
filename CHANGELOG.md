@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- `SessionOutcome` documents commons/EXIT-CODES.md as the canonical home
+  of its outcome vocabulary, with `TimedOut` identified as the one
+  agentd-layer (caller-enforced timeout) addition.
 - `RELEASING.md` Tooling Provenance section and a `scripts/release-check`
   provenance header: the script is agentd-owned, the ceremony convention is
   canonical in commons, and no repo is the tooling upstream.
