@@ -1,27 +1,36 @@
 # agentd
 
-Autonomous AI agent runtime daemon. agentd runs agent sessions in ephemeral
-Podman containers on infrastructure you control. Each session gets an isolated
-execution environment — its own identity, credentials, a fresh repository
-clone, and read-only methodology context — supervised from setup through
-teardown. agentd prepares and supervises these environments; model inference and
-MCP transport belong to the agent runtime inside the container.
+**Run autonomous agents like production workloads — isolated, credentialed,
+and evidence-leaving.**
+
+agentd is the daemon that makes "an agent ran unattended on my hardware"
+something you can defend. Each session gets an ephemeral rootless Podman
+container with its own unprivileged identity, a fresh repository clone, and
+read-only methodology context; privileged setup ends in a permanent `gosu`
+drop. Credentials are minimized by construction — session secrets are
+delivered as ephemeral podman secrets and removed from the host-side store
+the moment the container is running, and an HTTPS repo token is consumed by
+the clone step and unset before the agent process ever starts.
+
+And when the session ends, it leaves **evidence**: a sealed audit record —
+directories read-only, metadata published by atomic replace, symlink and
+hardlink tampering refused loudly — whose
+[format is a documented contract](docs/audit-record.md). A record with an
+outcome is proof the tree was already sealed when that outcome was written.
+That is the property the rest of the
+[Tesserine](https://github.com/tesserine) stack's trust story rests on
+(ecosystem map:
+[commons SOURCE-OF-TRUTH.md](https://github.com/tesserine/commons/blob/main/SOURCE-OF-TRUTH.md)).
+
+The operator declares *what* through agent configuration — which image, which
+credentials, which methodology. agentd owns *how* — container lifecycle,
+privilege management, resource cleanup. Model inference and MCP transport
+belong to the agent runtime inside the container; agentd deliberately does
+neither.
 
 The project targets Linux hosts. Non-Linux builds fail intentionally because
 the runner depends on Linux runtime primitives including rootless Podman,
 systemd user services, and SELinux-aware filesystem handling.
-
-## Why
-
-Running autonomous agents requires infrastructure: isolated environments,
-credential injection, workspace setup, identity management. Operators building
-this ad-hoc re-solve the same problems for each agent and each deployment.
-
-agentd is the self-hosted runtime layer. The operator declares *what* through
-agent configuration — which image, which credentials, which methodology.
-agentd owns *how* — container lifecycle, privilege management, resource cleanup.
-The agent gets an isolated, ephemeral workspace with exactly what it needs and
-nothing more.
 
 ## Status
 
