@@ -256,7 +256,7 @@ explicitly so the daemon socket location is also a deliberate host mount.
 
 On SIGINT or SIGTERM, the daemon stops accepting connections and drains
 in-flight sessions; a second signal exits immediately.
-The Unix socket protocol is internal to `agentd` in `v0.1.x`: daemon and CLI must be the same build, and operators must restart the daemon after replacing the binary before using `agentd run` again.
+The Unix socket protocol is internal to `agentd` in `v0.1.x`: daemon and CLI must be the same build, and operators must restart the daemon after replacing the binary before using `agentd run` again. The wire format is documented in [docs/socket-protocol.md](docs/socket-protocol.md).
 
 Trigger a session through the running daemon:
 
@@ -373,6 +373,9 @@ schedule evaluation: the next occurrence runs at its next scheduled time.
 
 ## Going Deeper
 
+- **[docs/quickstart.md](docs/quickstart.md)** — end-to-end tutorial: build
+  the image, configure an agent, run the first session, inspect the sealed
+  audit record.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — session lifecycle phases, container
   isolation model, credential flow, and workspace crate boundaries. How the
   system is built and why.
@@ -380,6 +383,15 @@ schedule evaluation: the next occurrence runs at its next scheduled time.
   branch conventions. Read this before contributing.
 - **[examples/agentd.toml](examples/agentd.toml)** — annotated agent
   configuration. Starting point for writing your own.
+- **[docs/runbooks/](docs/runbooks/README.md)** — operator runbooks: equip an
+  agent SSH identity, provision session secrets, redeploy the daemon.
+- **[docs/audit-record.md](docs/audit-record.md)** — the sealed audit record
+  format: layout, `session.json` and `manifest.json` schemas, sealing
+  semantics. The supported surface for inspecting what a session did.
+- **[docs/socket-protocol.md](docs/socket-protocol.md)** — daemon socket wire
+  format (internal, unversioned in `v0.1.x`).
+- **[docs/environment.md](docs/environment.md)** — every environment variable
+  the daemon reads or injects, by scope.
 
 ## License
 

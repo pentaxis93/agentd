@@ -1,5 +1,7 @@
 # AGENTS
 
+Principles: [pentaxis93/principles](https://github.com/pentaxis93/principles)
+
 ## Project Identity
 agentd is an autonomous AI agent runtime daemon for running autonomous AI agents on infrastructure you control. It is for builders and operators who need predictable, self-hosted execution of agent workflows without relying on hosted runtimes. The project is being built as a modular Rust workspace so runtime, scheduling, and integration concerns can evolve independently.
 
@@ -18,6 +20,24 @@ Every change must follow this sequence: behavioral spec -> test -> implementatio
 
 ### Coherence on Landing
 Each landing PR must verify documentation and code remain aligned. Confirm README claims still match repository reality. Confirm `ARCHITECTURE.md` still describes the actual architecture. Confirm doc comments match runtime behavior and interfaces. Confirm `AGENTS.md` still reflects required agent workflow and quality gates. If drift is found, fix it in the same PR.
+
+## Build and Test
+
+MSRV is Rust 1.85 (`rust-version` in `Cargo.toml`); the workspace targets
+Linux and non-Linux builds fail intentionally. The full loop:
+
+```sh
+cargo build
+cargo test          # unit + integration; podman interactions use a fake-podman fixture
+cargo clippy --all-targets
+cargo fmt --check
+```
+
+Integration tests live in `crates/agentd/tests/` and per-crate `tests/`;
+they do not require a running Podman service (container interactions go
+through the fake-podman test fixture). Verifying real session execution
+end-to-end requires a rootless-Podman host — follow
+[`docs/quickstart.md`](docs/quickstart.md).
 
 ## Conventions
 - Commit messages must use conventional commits: `feat:`, `fix:`, `docs:`, `refactor:`, `test:`.

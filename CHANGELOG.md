@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- `AGENTS.md` carries the canonical principles pointer
+  (`pentaxis93/principles`), matching the runa/groundwork entry-line
+  convention (#148).
+- `docs/environment.md` — environment-variable reference covering the
+  daemon-process, session-injection, and test-only scopes.
+- `AGENTS.md` Build and Test section: MSRV, the cargo loop, and where the
+  integration tests live.
+- `docs/quickstart.md` — end-to-end tutorial from image build through a
+  completed session to the sealed audit record, using the canonical
+  example-hello integration request.
+- `SessionOutcome` documents commons/EXIT-CODES.md as the canonical home
+  of its outcome vocabulary, with `TimedOut` identified as the one
+  agentd-layer (caller-enforced timeout) addition.
+- `RELEASING.md` Tooling Provenance section and a `scripts/release-check`
+  provenance header: the script is agentd-owned, the ceremony convention is
+  canonical in commons, and no repo is the tooling upstream.
+
+- Invariant-level documentation next to security-critical code: `audit.rs`
+  gains a module contract (lifecycle, sealing invariants, symlink skipping,
+  multi-link refusal, atomic metadata publish) with doc comments tying the
+  sealing constants and lifecycle functions to the security model;
+  `protocol.rs` documents the socket message enums and links the outcome
+  vocabulary to its canonical home at commons/EXIT-CODES.md;
+  `resources.rs` and `container.rs` document the secret-lifetime and
+  privilege-drop paths.
+- `docs/socket-protocol.md` — daemon Unix-socket wire reference: framing,
+  connection lifecycle, message shapes, outcome-status table, and the
+  internal/unversioned same-build rationale.
+- `docs/audit-record.md` — audit record format reference: layout,
+  `session.json` (`schema_version: 2`) and transcript `manifest.json`
+  schemas, sealing semantics, and change policy.
+
+- Operator runbooks under `docs/runbooks/`: equip an agent SSH identity,
+  provision session secrets, and redeploy the daemon. Generic successors to
+  the runbooks retired with `tesserine/ops` (recoverable at ops commit
+  `c394550^`); host-specific deployment state remains with the operator's
+  host operations repository.
+
 - Runner setup now supports SSH repository clone through agent-scoped mounted
   OpenSSH material, including `ssh://` and `user@host:path` repository URLs.
 - Agent configuration now accepts an optional `forge_type` field and injects the

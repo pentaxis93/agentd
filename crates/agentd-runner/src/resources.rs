@@ -93,6 +93,14 @@ pub(crate) fn unique_suffix() -> Result<String, RunnerError> {
     unique_suffix_with(|bytes| fill_random_bytes(bytes).map_err(std::io::Error::other))
 }
 
+/// Allocate every host-side resource a session needs — methodology staging
+/// copy, audit and transcript mounts, invocation-input mount, and one
+/// ephemeral podman secret per configured credential — or none of them.
+///
+/// Invariant: no leaked secret outlives a failed allocation. Each failure
+/// path rolls back everything already created (secrets first, then staging)
+/// before returning, and the rollback's own outcome is carried in the
+/// returned [`ResourceAllocationFailure`] so cleanup failures are loud.
 pub(crate) fn prepare_session_resources(
     container_name: &str,
     spec: &SessionSpec,
@@ -223,6 +231,10 @@ pub(crate) fn prepare_session_resources(
     Ok(resources)
 }
 
+/// Best-effort teardown after a late allocation failure: secrets are
+/// removed before the staging directory, every cleanup failure is logged,
+/// and the first cleanup error is preserved alongside the original
+/// allocation error rather than replacing it.
 fn rollback_failed_resource_allocation(
     resources: &SessionResources,
     session_id: &str,
@@ -275,6 +287,9 @@ fn rollback_failed_staging_dir_allocation(
     ResourceAllocationFailure::with_rollback_result(error, rollback_result)
 }
 
+/// Remove the session's ephemeral podman secrets. Secrets hold credential
+/// values for the session's lifetime only; leaving one behind would leak a
+/// live credential into podman's secret store beyond the session boundary.
 pub(crate) fn cleanup_podman_secrets(secret_bindings: &[SecretBinding]) -> Result<(), RunnerError> {
     let secret_names = secret_bindings
         .iter()
@@ -283,6 +298,9 @@ pub(crate) fn cleanup_podman_secrets(secret_bindings: &[SecretBinding]) -> Resul
     cleanup_podman_secret_names(&secret_names)
 }
 
+/// Remove secrets by name, tolerating ones already gone: the existing-name
+/// intersection makes cleanup idempotent, so a retry after partial failure
+/// cannot fail on the already-deleted remainder.
 pub(crate) fn cleanup_podman_secret_names(secret_names: &[String]) -> Result<(), RunnerError> {
     if secret_names.is_empty() {
         return Ok(());
