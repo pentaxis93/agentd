@@ -52,6 +52,12 @@ pub(crate) fn create_container(
     .map(|_| ())
 }
 
+/// Run the created container attached until exit and classify the result.
+///
+/// Secret lifetime: once the container is observed `running`, the session's
+/// podman secrets are deleted (`wait_for_container_exit`) — the values are
+/// already inside the session environment, so the host-side secret store
+/// holds them only for the startup window.
 pub(crate) fn run_container_to_completion(
     container_name: &str,
     session_id: &str,
@@ -79,6 +85,12 @@ pub(crate) fn run_container_to_completion(
     }
 }
 
+/// [`run_container_to_completion`] with a caller-enforced deadline. On
+/// timeout the container is force-removed and the outcome is
+/// [`SessionOutcome::TimedOut`] — a caller-layer outcome that commons
+/// EXIT-CODES.md deliberately leaves outside the shared exit-code
+/// vocabulary. Cleanup failures degrade to kill + log, never to a hung
+/// session.
 pub(crate) fn run_container_with_timeout(
     container_name: &str,
     session_id: &str,
@@ -140,6 +152,8 @@ pub(crate) fn run_container_with_timeout(
     }
 }
 
+/// Force-remove the session container, ignoring absence so cleanup is
+/// idempotent across retries and crash-recovery paths.
 pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError> {
     run_podman_command(vec![
         "rm".to_string(),
@@ -150,15 +164,18 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
     .map(|_| ())
 }
 
-// Generates the shell script passed as the container entrypoint via
-// `/bin/sh -lc`. The script runs as root (UID 0) to perform privileged setup:
-// creating the agent's unix user, recursively re-owning pre-existing home
-// content while preserving host-backed mount targets, cloning the repository,
-// and transferring repository ownership. It then drops privileges permanently
-// via `gosu`
-// then invokes runa as the unprivileged agent user. `set -eu` at the top
-// ensures any setup failure aborts immediately rather than continuing with a
-// broken workspace.
+/// Generates the shell script passed as the container entrypoint via
+/// `/bin/sh -lc`.
+///
+/// Privilege model: the script starts as root (UID 0) for privileged setup —
+/// creating the agent's unix user, recursively re-owning pre-existing home
+/// content while preserving host-backed mount targets, cloning the
+/// repository, and transferring repository ownership. Every workload step
+/// (clone included) runs through `gosu <agent>`, and the final command is
+/// `exec gosu <agent> …`, so the drop to the unprivileged session user is
+/// permanent — no root process remains to return to. `set -eu` at the top
+/// aborts on any setup failure rather than continuing with a broken
+/// workspace.
 fn build_container_script(
     spec: &SessionSpec,
     invocation: &SessionInvocation,

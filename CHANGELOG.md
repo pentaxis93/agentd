@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- Invariant-level documentation next to security-critical code: `audit.rs`
+  gains a module contract (lifecycle, sealing invariants, symlink no-follow,
+  multi-link refusal, atomic metadata publish) with doc comments tying the
+  sealing constants and lifecycle functions to the security model;
+  `protocol.rs` documents the socket message enums and links the outcome
+  vocabulary to its canonical home at commons/EXIT-CODES.md;
+  `resources.rs` and `container.rs` document the secret-lifetime and
+  privilege-drop paths.
+- `docs/socket-protocol.md` — daemon Unix-socket wire reference: framing,
+  connection lifecycle, message shapes, outcome-status table, and the
+  internal/unversioned same-build rationale.
+- `docs/audit-record.md` — audit record format reference: layout,
+  `session.json` (`schema_version: 2`) and transcript `manifest.json`
+  schemas, sealing semantics, and change policy.
+
 - Operator runbooks under `docs/runbooks/`: equip an agent SSH identity,
   provision session secrets, and redeploy the daemon. Generic successors to
   the runbooks retired with `tesserine/ops` (recoverable at ops commit

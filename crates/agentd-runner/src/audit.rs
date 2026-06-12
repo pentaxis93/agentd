@@ -1,3 +1,42 @@
+//! Session audit records: preparation, transcript finalization, and sealing.
+//!
+//! Every session leaves a persistent record under
+//! `<audit_root>/<agent>/<session_id>/` (layout and format:
+//! `docs/audit-record.md`; security tradeoffs: `ARCHITECTURE.md`
+//! § "Host audit records"). The record moves through exactly one lifecycle:
+//!
+//! 1. [`prepare_session_audit_record`] — create the record tree with
+//!    *active* permissions and publish initial `session.json` metadata.
+//!    Any preparation failure rolls the whole record directory back so a
+//!    half-built record is never observable.
+//! 2. The session runs; runa writes `runa/` state and transcript events
+//!    arrive in `agentd/transcript/` through the session-user identity.
+//! 3. [`finalize_session_transcript`] — render `events.jsonl` into
+//!    `transcript.md` and record a coverage verdict in `manifest.json`.
+//!    A rendering failure is itself recorded (`finalization_failed`) so
+//!    the manifest never silently overstates coverage.
+//! 4. [`finalize_session_audit_record`] — seal the tree read-only and only
+//!    then publish the finalized metadata. A record with a populated
+//!    `outcome` is therefore always a sealed record.
+//!
+//! Sealing is the security boundary between "session may still write" and
+//! "record is evidence". The invariants the sealing path enforces:
+//!
+//! - **Symlinks are never followed.** Inspection uses `symlink_metadata`,
+//!   chmod uses `fchmodat(AT_SYMLINK_NOFOLLOW)`, and symlink entries are
+//!   skipped, so session-written links cannot redirect a daemon-privileged
+//!   chmod outside the record.
+//! - **Multi-linked files are refused, not sealed.** A regular file with
+//!   `nlink > 1` aborts finalization (`preflight_validate_sealable_tree`):
+//!   chmod acts on the inode, so sealing a hardlink would mutate a file
+//!   that also lives outside the record.
+//! - **Metadata is published by atomic replace.** `session.json` is written
+//!   to a temp file, fsynced, then renamed into place (`write_atomic`);
+//!   readers see the old or the new metadata, never a partial write.
+//! - **The daemon seals with its own filesystem authority.** No Podman or
+//!   user-namespace re-entry happens during finalization; the startup
+//!   audit-root probe verified this authority before any dispatch.
+
 use crate::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use serde::Serialize;
 use serde_json::Value;
@@ -13,10 +52,18 @@ use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+/// `session.json` schema version; bump on any breaking metadata change and
+/// update `docs/audit-record.md` in the same change.
 const METADATA_SCHEMA_VERSION: u32 = 2;
+/// Directories of an *active* (unsealed) record. World-traversable so the
+/// session-user identity can reach the `runa/` and transcript subtrees.
 const ACTIVE_AUDIT_DIRECTORY_MODE: u32 = 0o755;
+/// Sealed regular files: world-readable, writable by no one. Deliberate
+/// single-tenant tradeoff — see ARCHITECTURE.md § "Host audit records".
 const SEALED_FILE_MODE: u32 = 0o444;
+/// Sealed directories: traversal without write, same tradeoff as files.
 const SEALED_DIRECTORY_MODE: u32 = 0o555;
+/// `manifest.json` schema version for the transcript coverage verdict.
 const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
 const EVENTS_ARTIFACT: &str = "events.jsonl";
 const MANIFEST_ARTIFACT: &str = "manifest.json";
@@ -75,6 +122,12 @@ impl fmt::Display for TranscriptFinalizationFailure {
     }
 }
 
+/// Create the session's audit record tree with active permissions and
+/// publish the initial `session.json` (no `end_timestamp`/`outcome` yet).
+///
+/// On any failure the record directory is removed (`rollback_record_dir_on_error`)
+/// so a half-prepared record is never left for an operator to mistake for a
+/// real session.
 pub(crate) fn prepare_session_audit_record(
     session_id: &str,
     spec: &SessionSpec,
@@ -124,6 +177,15 @@ fn prepare_session_audit_record_at(
     })
 }
 
+/// Seal the record read-only, then publish finalized metadata — in that
+/// order, so a `session.json` carrying an `outcome` is proof the tree was
+/// already sealed.
+///
+/// Ordering within: restore daemon traversal over session-written
+/// directories, refuse the tree if any regular file is multi-linked, seal
+/// everything except the metadata path (which must stay replaceable for the
+/// final atomic write), then atomically publish `session.json` already in
+/// sealed mode.
 pub(crate) fn finalize_session_audit_record(
     record: &SessionAuditRecord,
     completion: SessionAuditCompletion<'_>,
@@ -140,6 +202,12 @@ pub(crate) fn finalize_session_audit_record(
     write_finalized_session_audit_metadata(record, &end_timestamp, outcome, exit_code)
 }
 
+/// Render the transcript artifacts and record a coverage verdict.
+///
+/// Coverage is honest by construction: a failure while producing
+/// `events.jsonl` or `transcript.md` is itself written into
+/// `manifest.json` as `finalization_failed` (with the error), so the
+/// manifest never claims more transcript than the record holds.
 pub(crate) fn finalize_session_transcript(record: &SessionAuditRecord) -> Result<(), RunnerError> {
     prepare_transcript_tree_for_finalization(&record.transcript_dir)?;
     match finalize_session_transcript_artifacts(record) {
@@ -434,6 +502,9 @@ fn write_fenced_code_block(
     Ok(())
 }
 
+/// Longest backtick run in untrusted transcript content — the rendered
+/// markdown fence must be strictly longer so session output cannot break
+/// out of its code block and forge transcript structure.
 fn max_consecutive_backticks(content: &str) -> usize {
     let mut current = 0;
     let mut max = 0;
@@ -541,6 +612,9 @@ fn ensure_transcript_directory(path: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// Re-grant owner access (`u+rwx` dirs, `u+rw` files) over the transcript
+/// tree without following symlinks, so finalization can read
+/// session-written events whatever modes the session left behind.
 fn repair_transcript_path_permissions(path: &Path) -> Result<(), RunnerError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
@@ -560,6 +634,10 @@ fn repair_transcript_path_permissions(path: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// chmod that never dereferences a final-component symlink
+/// (`fchmodat(AT_SYMLINK_NOFOLLOW)`): the audit tree contains
+/// session-written content, and following a planted link would let a
+/// session aim the daemon's chmod authority outside the record.
 fn set_owner_permissions_no_follow(path: &Path, mode: u32) -> Result<(), RunnerError> {
     let path = CString::new(path.as_os_str().as_bytes()).map_err(|error| {
         RunnerError::Io(std::io::Error::new(
@@ -586,6 +664,10 @@ fn seal_session_audit_record(record: &SessionAuditRecord) -> Result<(), RunnerEr
     seal_path_recursive(record, &record.record_dir)
 }
 
+/// Restore daemon read+traverse permission over session-written
+/// directories before validation and sealing walk them. The session user
+/// may have dropped directory modes; without this the walk could not even
+/// enumerate the tree it must seal.
 fn prepare_audit_tree_for_traversal(path: &Path) -> Result<(), RunnerError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -606,6 +688,13 @@ fn prepare_audit_tree_for_traversal(path: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// Refuse to seal a tree containing any multi-linked regular file.
+///
+/// `chmod` acts on the inode: sealing a hardlink planted by the session
+/// would flip permissions on a file that also exists outside the record.
+/// Refusing (rather than skipping) makes the tampering attempt loud — the
+/// session finalizes as an error instead of producing a quietly partial
+/// seal.
 fn preflight_validate_sealable_tree(path: &Path) -> Result<(), RunnerError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
@@ -660,6 +749,10 @@ fn seal_path(path: &Path, is_dir: bool) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// Paths excluded from sealing: the record root, `session.json`, and its
+/// parent directory. They must remain daemon-writable until the final
+/// atomic metadata publish; the metadata file itself is written directly
+/// in sealed mode.
 fn should_skip_sealing_path(record: &SessionAuditRecord, path: &Path) -> bool {
     path == record.record_dir
         || path == record.metadata_path
@@ -669,6 +762,9 @@ fn should_skip_sealing_path(record: &SessionAuditRecord, path: &Path) -> bool {
             .is_some_and(|metadata_dir| path == metadata_dir)
 }
 
+/// Publish a payload by temp-file write + fsync + rename within the same
+/// directory. Readers observe the previous content or the complete new
+/// content, never a torn write; the temp file is removed on failure.
 fn write_atomic(path: &Path, payload: &[u8], file_mode: Option<u32>) -> Result<(), RunnerError> {
     let temp_path = path.with_extension("json.tmp");
     let parent = path.parent().ok_or_else(|| {
