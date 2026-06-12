@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- `RELEASING.md` Tooling Provenance section and a `scripts/release-check`
+  provenance header: the script is agentd-owned, the ceremony convention is
+  canonical in commons, and no repo is the tooling upstream.
+
 - Invariant-level documentation next to security-critical code: `audit.rs`
   gains a module contract (lifecycle, sealing invariants, symlink no-follow,
   multi-link refusal, atomic metadata publish) with doc comments tying the

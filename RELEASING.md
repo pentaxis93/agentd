@@ -26,6 +26,20 @@ Artifacts built from the tag must report that identity:
 This adapts the Tesserine release conventions in commons ADR-0006, ADR-0010,
 and ADR-0011 to agentd's release surface.
 
+## Tooling Provenance
+
+`scripts/release-check` (with its `scripts/verify-release-adoption.sh`
+self-test) is the agentd-owned implementation of the shared release
+ceremony's verification checks; the release cut itself uses `cargo release`
+per ADR-0006. The ceremony convention is canonical in
+[commons RELEASE.md](https://github.com/tesserine/commons/blob/main/RELEASE.md)
+and ADR-0006/0011/0012. The script shares ancestry with the sibling
+implementations in the other release-component repos
+([commons#21](https://github.com/tesserine/commons/issues/21)) but is
+independently owned: no repo is the tooling upstream, and fixes do not
+propagate automatically. Ownership details:
+[base RELEASING.md § Release Tooling Ownership](https://github.com/tesserine/base/blob/main/RELEASING.md#release-tooling-ownership).
+
 ## Pre-Release Gate
 
 A releasable commit is on `main`, up to date with `origin/main`, and has a
