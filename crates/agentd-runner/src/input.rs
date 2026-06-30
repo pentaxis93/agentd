@@ -6,10 +6,10 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub(crate) const INVOCATION_INPUT_MOUNT_PATH: &str = "/agentd/invocation-input";
-const REQUEST_ARTIFACT_TYPE: &str = "request";
-const REQUEST_ARTIFACT_ID: &str = "operator-input";
-const REQUEST_SOURCE: &str = "operator";
-const SUPPORTED_REQUEST_CANONICAL_VERSIONS: &[&str] = &["1.0.0"];
+const INTENT_ARTIFACT_TYPE: &str = "intent";
+const INTENT_ARTIFACT_ID: &str = "operator-input";
+const INTENT_SOURCE: &str = "operator";
+const SUPPORTED_INTENT_CANONICAL_VERSIONS: &[&str] = &["1.0.0"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedInvocationInput {
@@ -39,39 +39,39 @@ pub(crate) fn resolve_invocation_input(
 
     let manifest = load_manifest(methodology_dir)?;
     match input {
-        InvocationInput::RequestText { description } => {
-            let schema_path = methodology_dir.join("schemas/request.schema.json");
-            ensure_declared_artifact_type(&manifest, REQUEST_ARTIFACT_TYPE).map_err(|message| {
+        InvocationInput::IntentText { description } => {
+            let schema_path = methodology_dir.join("schemas/intent.schema.json");
+            ensure_declared_artifact_type(&manifest, INTENT_ARTIFACT_TYPE).map_err(|message| {
                 RunnerError::InvalidInvocationInput {
                     message: format!(
-                        "methodology does not support operator request input: {message}"
+                        "methodology does not support operator intent input: {message}"
                     ),
                 }
             })?;
             let schema = load_schema(&schema_path).map_err(|message| {
                 RunnerError::InvalidInvocationInput {
                     message: format!(
-                        "methodology does not support operator request input: {message}"
+                        "methodology does not support operator intent input: {message}"
                     ),
                 }
             })?;
-            ensure_supported_request_version(&schema).map_err(|message| {
+            ensure_supported_intent_version(&schema).map_err(|message| {
                 RunnerError::InvalidInvocationInput {
                     message: format!(
-                        "methodology does not support operator request input: {message}"
+                        "methodology does not support operator intent input: {message}"
                     ),
                 }
             })?;
 
             let document = json!({
                 "description": description,
-                "source": REQUEST_SOURCE,
+                "source": INTENT_SOURCE,
             });
-            validate_document(&schema, &document, REQUEST_ARTIFACT_TYPE)?;
+            validate_document(&schema, &document, INTENT_ARTIFACT_TYPE)?;
 
             Ok(Some(ResolvedInvocationInput {
-                artifact_type: REQUEST_ARTIFACT_TYPE.to_string(),
-                artifact_id: REQUEST_ARTIFACT_ID.to_string(),
+                artifact_type: INTENT_ARTIFACT_TYPE.to_string(),
+                artifact_id: INTENT_ARTIFACT_ID.to_string(),
                 document_json: render_document(&document)?,
             }))
         }
@@ -157,18 +157,18 @@ fn load_schema(path: &Path) -> Result<Value, String> {
         .map_err(|error| format!("schema {} must contain valid JSON: {error}", path.display()))
 }
 
-fn ensure_supported_request_version(schema: &Value) -> Result<(), String> {
+fn ensure_supported_intent_version(schema: &Value) -> Result<(), String> {
     let version = schema
         .get("x-tesserine-canonical")
         .and_then(|value| value.get("version"))
         .and_then(Value::as_str)
-        .ok_or_else(|| "request schema must declare x-tesserine-canonical.version".to_string())?;
-    if SUPPORTED_REQUEST_CANONICAL_VERSIONS.contains(&version) {
+        .ok_or_else(|| "intent schema must declare x-tesserine-canonical.version".to_string())?;
+    if SUPPORTED_INTENT_CANONICAL_VERSIONS.contains(&version) {
         return Ok(());
     }
 
     Err(format!(
-        "canonical request version {version} is not supported"
+        "canonical intent version {version} is not supported"
     ))
 }
 

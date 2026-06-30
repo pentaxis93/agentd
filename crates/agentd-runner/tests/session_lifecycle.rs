@@ -68,18 +68,18 @@ fn write_methodology_manifest(path: &Path, artifact_types: &[&str]) {
         .expect("methodology manifest should be written");
 }
 
-fn install_request_schema(path: &Path, version: &str) {
+fn install_intent_schema(path: &Path, version: &str) {
     let schema_dir = path.join("schemas");
     fs::create_dir_all(&schema_dir).expect("schema dir should be created");
     fs::write(
-        schema_dir.join("request.schema.json"),
+        schema_dir.join("intent.schema.json"),
         format!(
             r#"{{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "x-tesserine-canonical": {{
     "version": "{version}",
-    "schema_url": "https://example.com/request.schema.json",
-    "prose_url": "https://example.com/REQUEST.md"
+    "schema_url": "https://example.com/intent.schema.json",
+    "prose_url": "https://example.com/INTENT.md"
   }},
   "type": "object",
   "required": ["description", "source"],
@@ -87,13 +87,25 @@ fn install_request_schema(path: &Path, version: &str) {
   "properties": {{
     "description": {{ "type": "string", "minLength": 1 }},
     "source": {{ "type": "string", "minLength": 1 }},
-    "context": {{ "type": "string" }}
+    "references": {{
+      "type": "array",
+      "minItems": 1,
+      "items": {{
+        "type": "object",
+        "required": ["kind", "ref"],
+        "additionalProperties": false,
+        "properties": {{
+          "kind": {{ "type": "string", "enum": ["ticket", "work-unit"] }},
+          "ref": {{ "type": "string", "minLength": 1 }}
+        }}
+      }}
+    }}
   }}
 }}
 "#
         ),
     )
-    .expect("request schema should be written");
+    .expect("intent schema should be written");
 }
 
 fn install_claim_schema(path: &Path) {
@@ -190,24 +202,24 @@ fn succeeds_without_timeout_and_cleans_up_container() {
 }
 
 #[test]
-fn materializes_request_text_input_before_session_command_runs() {
-    if skip_if_podman_unavailable("materializes_request_text_input_before_session_command_runs") {
+fn materializes_intent_text_input_before_session_command_runs() {
+    if skip_if_podman_unavailable("materializes_intent_text_input_before_session_command_runs") {
         return;
     }
     let _guard = podman_test_lock()
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("request-input-run");
-    write_methodology_manifest(&fixture.methodology_dir(), &["request"]);
-    install_request_schema(&fixture.methodology_dir(), "1.0.0");
+    let fixture = SessionFixture::new("intent-input-run");
+    write_methodology_manifest(&fixture.methodology_dir(), &["intent"]);
+    install_intent_schema(&fixture.methodology_dir(), "1.0.0");
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "request-input-run".to_string(),
+            agent_name: "intent-input-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
@@ -216,14 +228,14 @@ fn materializes_request_text_input_before_session_command_runs() {
             agent_command: vec!["site-builder".to_string(), "exec".to_string()],
             environment: vec![ResolvedEnvironmentVariable {
                 name: "SESSION_TEST_BEHAVIOR".to_string(),
-                value: "assert-request-input-present".to_string(),
+                value: "assert-intent-input-present".to_string(),
             }],
         },
         SessionInvocation {
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
-            input: Some(InvocationInput::RequestText {
+            input: Some(InvocationInput::IntentText {
                 description: "Add a status page".to_string(),
             }),
             timeout: None,
@@ -387,9 +399,9 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
 }
 
 #[test]
-fn rejects_request_text_when_methodology_declares_an_unsupported_request_version() {
+fn rejects_intent_text_when_methodology_declares_an_unsupported_intent_version() {
     if skip_if_podman_unavailable(
-        "rejects_request_text_when_methodology_declares_an_unsupported_request_version",
+        "rejects_intent_text_when_methodology_declares_an_unsupported_intent_version",
     ) {
         return;
     }
@@ -397,16 +409,16 @@ fn rejects_request_text_when_methodology_declares_an_unsupported_request_version
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("unsupported-request-version-run");
-    write_methodology_manifest(&fixture.methodology_dir(), &["request"]);
-    install_request_schema(&fixture.methodology_dir(), "2.0.0");
+    let fixture = SessionFixture::new("unsupported-intent-version-run");
+    write_methodology_manifest(&fixture.methodology_dir(), &["intent"]);
+    install_intent_schema(&fixture.methodology_dir(), "2.0.0");
     let image = fixture.build_image();
 
     let error = run_session_with_test_audit_root(
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "unsupported-request-version-run".to_string(),
+            agent_name: "unsupported-intent-version-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
@@ -419,18 +431,18 @@ fn rejects_request_text_when_methodology_declares_an_unsupported_request_version
             repo_url: fixture.repo_url(),
             repo_token: None,
             work_unit: None,
-            input: Some(InvocationInput::RequestText {
+            input: Some(InvocationInput::IntentText {
                 description: "Add a status page".to_string(),
             }),
             timeout: None,
         },
     )
-    .expect_err("unsupported request version should fail before session start");
+    .expect_err("unsupported intent version should fail before session start");
 
     assert!(
         error
             .to_string()
-            .contains("canonical request version 2.0.0 is not supported"),
+            .contains("canonical intent version 2.0.0 is not supported"),
         "expected unsupported-version error, got: {error}"
     );
 }
@@ -2664,10 +2676,10 @@ case "$command_name" in
             exit 0
         fi
 
-        if [ "${SESSION_TEST_BEHAVIOR:-}" = "assert-request-input-present" ]; then
-            [ -f "${HOME}/repo/.runa/workspace/request/operator-input.json" ]
-            grep -F '"description":"Add a status page"' "${HOME}/repo/.runa/workspace/request/operator-input.json"
-            grep -F '"source":"operator"' "${HOME}/repo/.runa/workspace/request/operator-input.json"
+        if [ "${SESSION_TEST_BEHAVIOR:-}" = "assert-intent-input-present" ]; then
+            [ -f "${HOME}/repo/.runa/workspace/intent/operator-input.json" ]
+            grep -F '"description":"Add a status page"' "${HOME}/repo/.runa/workspace/intent/operator-input.json"
+            grep -F '"source":"operator"' "${HOME}/repo/.runa/workspace/intent/operator-input.json"
             exit 0
         fi
 

@@ -1082,7 +1082,7 @@ mod tests {
 
         let mount = create_invocation_input_mount(
             Some(&ResolvedInvocationInput {
-                artifact_type: "request".to_string(),
+                artifact_type: "intent".to_string(),
                 artifact_id: "operator-input".to_string(),
                 document_json: "{\"description\":\"Add a status page\",\"source\":\"operator\"}\n"
                     .to_string(),

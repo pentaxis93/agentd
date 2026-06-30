@@ -71,7 +71,7 @@ Then run a session against the canonical integration fixture and confirm a
 sealed audit record appears:
 
 ```sh
-agentd run <agent> https://github.com/tesserine/example-hello --request 'add a `greet(name)` function'
+agentd run <agent> https://github.com/tesserine/example-hello --intent 'add a `greet(name)` function'
 ```
 
 ## Failure modes

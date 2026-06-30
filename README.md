@@ -45,7 +45,7 @@ Agents may now declare a default repository and an optional cron schedule.
 Manual runs still flow through `agentd run`, and scheduled runs dispatch
 through the same daemon socket intake without introducing a separate job type.
 Manual runs may also carry per-invocation work input without modifying the
-agent: request text can be synthesized into a canonical request artifact, and
+agent: intent text can be synthesized into a canonical intent artifact, and
 complete JSON artifacts can be placed directly into the session workspace when
 the active methodology declares the relevant artifact type and schema.
 Agents may also declare additional bind mounts for host-managed state such as
@@ -276,12 +276,12 @@ agentd run site-builder --work-unit issue-42
 Manual invocation supports intake-mode and work-mode surfaces:
 
 - `--work-unit <ID>` targets existing queued work
-- `--request <TEXT>` synthesizes a canonical request artifact at
-  `.runa/workspace/request/operator-input.json`
+- `--intent <TEXT>` synthesizes a canonical intent artifact at
+  `.runa/workspace/intent/operator-input.json`
 - `--artifact-type <TYPE> --artifact-file <PATH>` validates and places a
   complete JSON artifact at `.runa/workspace/<TYPE>/<file-stem>.json`
 
-`--request` is intake mode and is mutually exclusive with `--work-unit` and
+`--intent` is intake mode and is mutually exclusive with `--work-unit` and
 `--artifact-file`. To start work mode from an operator-supplied work-unit
 artifact, combine the selected work-unit id with a matching `work-unit` artifact
 file:
@@ -313,11 +313,11 @@ agentd run --socket-path /custom/agentd.sock site-builder --work-unit issue-42
 agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit issue-42
 ```
 
-Text input is methodology-gated. `--request` is available only when the active
-methodology declares artifact type `request`, ships `schemas/request.schema.json`,
-and that schema advertises a supported canonical request version through
+Text input is methodology-gated. `--intent` is available only when the active
+methodology declares artifact type `intent`, ships `schemas/intent.schema.json`,
+and that schema advertises a supported canonical intent version through
 `x-tesserine-canonical.version`. In `agentd v0.1.x`, the supported set is
-`1.0.0` only. Unsupported or undeclared request support is rejected before the
+`1.0.0` only. Unsupported or undeclared intent support is rejected before the
 container is created.
 
 Artifact-file input is generic. The CLI reads the file locally, requires UTF-8
@@ -329,10 +329,10 @@ the artifact type in `manifest.toml` and ships a matching
 Examples:
 
 ```bash
-agentd run site-builder --request "Add a status page"
+agentd run site-builder --intent "Add a status page"
 agentd run site-builder --artifact-type claim --artifact-file ./claim.json
 agentd run site-builder --work-unit issue-42 --artifact-type work-unit --artifact-file ./issue-42.json
-agentd run site-builder https://github.com/pentaxis93/agentd.git --request "Review the last release candidate"
+agentd run site-builder https://github.com/pentaxis93/agentd.git --intent "Review the last release candidate"
 ```
 
 Both manual and scheduled dispatches use the same daemon socket intake. Inside
@@ -347,7 +347,7 @@ the container, the agent sees:
 - Credentials injected as environment variables
 - `GROUNDWORK_FORGE_TYPE` with the configured active forge type, defaulting to `github`
 - `AGENTD_WORK_UNIT` when the invocation includes one
-- A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `--request` or `--artifact-file`
+- A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `--intent` or `--artifact-file`
 - `runa init` state followed by `runa run --agent-command -- <argv>` from the repo directory
 
 The container is force-removed on completion. The session's audit record

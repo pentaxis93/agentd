@@ -504,7 +504,7 @@ fn build_container_script_materializes_invocation_input_without_audit_workspace_
             timeout: None,
         },
         Some(&ResolvedInvocationInput {
-            artifact_type: "request".to_string(),
+            artifact_type: "intent".to_string(),
             artifact_id: "operator-input".to_string(),
             document_json: "{}\n".to_string(),
         }),
@@ -512,13 +512,13 @@ fn build_container_script_materializes_invocation_input_without_audit_workspace_
 
     assert!(
         script.contains(
-            "\ngosu 'myagent:myagent' mkdir -p '/home/myagent/repo/.runa/workspace/request'\n\
-             gosu 'myagent:myagent' cp '/agentd/invocation-input/document.json' '/home/myagent/repo/.runa/workspace/request/operator-input.json'\n"
+            "\ngosu 'myagent:myagent' mkdir -p '/home/myagent/repo/.runa/workspace/intent'\n\
+             gosu 'myagent:myagent' cp '/agentd/invocation-input/document.json' '/home/myagent/repo/.runa/workspace/intent/operator-input.json'\n"
         ),
         "invocation input should be written through the session user into the audit-backed workspace: {script}"
     );
     assert!(
-        !script.contains("chown -R 'myagent:myagent' '/home/myagent/repo/.runa/workspace/request'"),
+        !script.contains("chown -R 'myagent:myagent' '/home/myagent/repo/.runa/workspace/intent'"),
         "rootless session setup must not chown audit-backed workspace input: {script}"
     );
 }

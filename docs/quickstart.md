@@ -62,11 +62,11 @@ container instead — [README § Deployment](../README.md#deployment).)
 
 ## 5. Run the smoke-test session
 
-In a second shell, trigger the canonical integration request
+In a second shell, trigger the canonical integration intent
 ([example-hello](https://github.com/tesserine/example-hello)):
 
 ```sh
-./target/release/agentd run site-builder --request 'add a `greet(name)` function'
+./target/release/agentd run site-builder --intent 'add a `greet(name)` function'
 ```
 
 The command blocks until the session reaches a terminal outcome and

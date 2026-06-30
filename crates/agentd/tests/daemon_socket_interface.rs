@@ -423,7 +423,7 @@ fn daemon_rejects_conflicting_work_unit_and_input_from_socket_callers() {
             agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("issue-42".to_string()),
-            input: Some(InvocationInput::RequestText {
+            input: Some(InvocationInput::IntentText {
                 description: "Add a status page".to_string(),
             }),
         },
