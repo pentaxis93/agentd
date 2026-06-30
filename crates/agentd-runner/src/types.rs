@@ -88,8 +88,8 @@ pub struct ResolvedEnvironmentVariable {
 /// Typed operator-supplied input materialized into the session workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationInput {
-    /// Convenience text input synthesized into a canonical request artifact.
-    RequestText { description: String },
+    /// Convenience text input synthesized into a canonical intent artifact.
+    IntentText { description: String },
     /// A complete JSON artifact supplied by the operator.
     Artifact {
         artifact_type: String,

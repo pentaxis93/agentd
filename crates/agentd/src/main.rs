@@ -115,11 +115,11 @@ enum Command {
         repo: Option<String>,
         #[arg(long)]
         socket_path: Option<PathBuf>,
-        #[arg(long, conflicts_with = "request")]
+        #[arg(long, conflicts_with = "intent")]
         work_unit: Option<String>,
         #[arg(long, conflicts_with_all = ["work_unit", "artifact_file"])]
-        request: Option<String>,
-        #[arg(long, requires = "artifact_type", conflicts_with = "request")]
+        intent: Option<String>,
+        #[arg(long, requires = "artifact_type", conflicts_with = "intent")]
         artifact_file: Option<PathBuf>,
         #[arg(long, requires = "artifact_file")]
         artifact_type: Option<String>,
@@ -157,7 +157,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             repo,
             socket_path,
             work_unit,
-            request,
+            intent,
             artifact_file,
             artifact_type,
         }) => {
@@ -172,7 +172,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 agent,
                 repo,
                 work_unit,
-                request,
+                intent,
                 artifact_file,
                 artifact_type,
             )
@@ -217,12 +217,12 @@ fn run_client(
     agent: String,
     repo: Option<String>,
     work_unit: Option<String>,
-    request: Option<String>,
+    intent: Option<String>,
     artifact_file: Option<PathBuf>,
     artifact_type: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = resolve_client_socket_path(explicit_socket_path)?;
-    let input = resolve_invocation_input(request, artifact_file, artifact_type)?;
+    let input = resolve_invocation_input(intent, artifact_file, artifact_type)?;
     let outcome = request_run(
         &socket_path,
         &RunRequest {
@@ -242,12 +242,12 @@ fn run_client(
 }
 
 fn resolve_invocation_input(
-    request: Option<String>,
+    intent: Option<String>,
     artifact_file: Option<PathBuf>,
     artifact_type: Option<String>,
 ) -> Result<Option<InvocationInput>, Box<dyn std::error::Error>> {
-    if let Some(description) = request {
-        return Ok(Some(InvocationInput::RequestText { description }));
+    if let Some(description) = intent {
+        return Ok(Some(InvocationInput::IntentText { description }));
     }
 
     let Some(path) = artifact_file else {

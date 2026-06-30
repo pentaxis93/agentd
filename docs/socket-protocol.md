@@ -39,15 +39,15 @@ surfaces are the CLI and the audit record
 `input` is one of (externally tagged):
 
 ```json
-{"RequestText": {"description": "add a `greet(name)` function"}}
+{"IntentText": {"description": "add a `greet(name)` function"}}
 ```
 
 ```json
 {"Artifact": {"artifact_type": "work-unit", "artifact_id": "issue-42", "document": { "...": "..." }}}
 ```
 
-`RequestText` is synthesized into a canonical request artifact
-([commons REQUEST.md](https://github.com/tesserine/commons/blob/main/REQUEST.md));
+`IntentText` is synthesized into a canonical intent artifact
+([commons INTENT.md](https://github.com/tesserine/commons/blob/main/INTENT.md));
 `Artifact` is materialized verbatim after validation.
 
 ## Responses
@@ -92,5 +92,5 @@ printf '{"type":"ping"}\n' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/agentd/agent
 ```
 
 ```json
-{"type":"run","agent":"site-builder","repo_url":"https://github.com/tesserine/example-hello","work_unit":null,"input":{"RequestText":{"description":"add a `greet(name)` function"}}}
+{"type":"run","agent":"site-builder","repo_url":"https://github.com/tesserine/example-hello","work_unit":null,"input":{"IntentText":{"description":"add a `greet(name)` function"}}}
 ```

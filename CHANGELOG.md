@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Manual text input now uses canonical intent terminology end to end:
+  `agentd run --intent`, the daemon socket `IntentText` variant, and
+  `.runa/workspace/intent/operator-input.json` materialization.
+
 - README hero rewritten for the ecosystem README pass: positions agentd as
   the daemon for running autonomous agents like production workloads, with
   the isolation, credential-lifetime, and sealed-evidence guarantees stated

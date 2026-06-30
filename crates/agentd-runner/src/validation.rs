@@ -169,8 +169,8 @@ pub(crate) fn validate_invocation(invocation: &SessionInvocation) -> Result<(), 
 
 fn validate_work_mode_input(work_unit: &str, input: &InvocationInput) -> Result<(), RunnerError> {
     match input {
-        InvocationInput::RequestText { .. } => Err(RunnerError::InvalidInvocationInput {
-            message: "manual invocation cannot combine work_unit with request input".to_string(),
+        InvocationInput::IntentText { .. } => Err(RunnerError::InvalidInvocationInput {
+            message: "manual invocation cannot combine work_unit with intent input".to_string(),
         }),
         InvocationInput::Artifact {
             artifact_type,
@@ -1566,7 +1566,7 @@ mod tests {
             (Some("issue-42".to_string()), None),
             (
                 None,
-                Some(InvocationInput::RequestText {
+                Some(InvocationInput::IntentText {
                     description: "Add a status page".to_string(),
                 }),
             ),
@@ -1591,12 +1591,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_invocation_rejects_request_text_with_work_unit() {
+    fn validate_invocation_rejects_intent_text_with_work_unit() {
         let error = validate_invocation(&SessionInvocation {
             repo_url: "https://example.com/agentd.git".to_string(),
             repo_token: None,
             work_unit: Some("issue-42".to_string()),
-            input: Some(InvocationInput::RequestText {
+            input: Some(InvocationInput::IntentText {
                 description: "Add a status page".to_string(),
             }),
             timeout: None,
