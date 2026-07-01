@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `agentd run` now supports work-mode invocation from a matching supplied
   `work-unit` artifact, using `--work-unit <ID> --artifact-type work-unit
   --artifact-file <ID>.json`.
+- `agentd wish` starts an intent-seeded session through an evocative
+  operator prompt, collecting the statement and optional target before reusing
+  the existing canonical intent intake.
 
 ### Changed
 

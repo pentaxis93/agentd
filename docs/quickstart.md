@@ -66,11 +66,13 @@ In a second shell, trigger the canonical integration intent
 ([example-hello](https://github.com/tesserine/example-hello)):
 
 ```sh
-./target/release/agentd run site-builder --intent 'add a `greet(name)` function'
+./target/release/agentd wish site-builder
 ```
 
-The command blocks until the session reaches a terminal outcome and
-reports it. `success` means the work completed; any other label is
+`wish` greets you and prompts for the statement. For this smoke test, enter
+``add a `greet(name)` function`` at the intent prompt and leave the target
+prompt blank. The command blocks until the session reaches a terminal outcome
+and reports it. `success` means the work completed; any other label is
 interpreted per
 [commons EXIT-CODES.md](https://github.com/tesserine/commons/blob/main/EXIT-CODES.md).
 

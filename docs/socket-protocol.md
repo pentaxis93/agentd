@@ -7,9 +7,9 @@ types) and `crates/agentd/src/daemon.rs` (framing and dispatch).
 
 **Stability: internal and unversioned in `v0.1.x`.** Daemon and client must
 be the same build; messages carry no version field. After replacing the
-binary, restart the daemon before using `agentd run` again. Do not build
-external integrations against this protocol — the supported integration
-surfaces are the CLI and the audit record
+binary, restart the daemon before using `agentd wish` or `agentd run` again.
+Do not build external integrations against this protocol — the supported
+integration surfaces are the CLI and the audit record
 ([audit-record.md](audit-record.md)).
 
 ## Framing and connection lifecycle
@@ -43,7 +43,8 @@ surfaces are the CLI and the audit record
 ```
 
 `IntentText.target` is optional and, when present, is copied into the
-materialized intent artifact. There is no daemon CLI flag for `target`.
+materialized intent artifact. `agentd wish` can populate it from the optional
+target prompt; `agentd run --intent` has no target flag.
 
 ```json
 {"Artifact": {"artifact_type": "work-unit", "artifact_id": "issue-42", "document": { "...": "..." }}}
@@ -95,5 +96,5 @@ printf '{"type":"ping"}\n' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/agentd/agent
 ```
 
 ```json
-{"type":"run","agent":"site-builder","repo_url":"https://github.com/tesserine/example-hello","work_unit":null,"input":{"IntentText":{"statement":"add a `greet(name)` function"}}}
+{"type":"run","agent":"site-builder","repo_url":"https://github.com/tesserine/example-hello","work_unit":null,"input":{"IntentText":{"statement":"add a `greet(name)` function","target":"tesserine/example-hello#7"}}}
 ```
