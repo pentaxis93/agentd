@@ -89,7 +89,11 @@ pub struct ResolvedEnvironmentVariable {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationInput {
     /// Convenience text input synthesized into a canonical intent artifact.
-    IntentText { description: String },
+    IntentText {
+        statement: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
     /// A complete JSON artifact supplied by the operator.
     Artifact {
         artifact_type: String,

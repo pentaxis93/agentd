@@ -9,7 +9,7 @@ pub(crate) const INVOCATION_INPUT_MOUNT_PATH: &str = "/agentd/invocation-input";
 const INTENT_ARTIFACT_TYPE: &str = "intent";
 const INTENT_ARTIFACT_ID: &str = "operator-input";
 const INTENT_SOURCE: &str = "operator";
-const SUPPORTED_INTENT_CANONICAL_VERSIONS: &[&str] = &["1.0.0"];
+const SUPPORTED_INTENT_CANONICAL_VERSIONS: &[&str] = &["2.0.0"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedInvocationInput {
@@ -39,7 +39,7 @@ pub(crate) fn resolve_invocation_input(
 
     let manifest = load_manifest(methodology_dir)?;
     match input {
-        InvocationInput::IntentText { description } => {
+        InvocationInput::IntentText { statement, target } => {
             let schema_path = methodology_dir.join("schemas/intent.schema.json");
             ensure_declared_artifact_type(&manifest, INTENT_ARTIFACT_TYPE).map_err(|message| {
                 RunnerError::InvalidInvocationInput {
@@ -63,10 +63,17 @@ pub(crate) fn resolve_invocation_input(
                 }
             })?;
 
-            let document = json!({
-                "description": description,
-                "source": INTENT_SOURCE,
-            });
+            let document = match target {
+                Some(target) => json!({
+                    "statement": statement,
+                    "source": INTENT_SOURCE,
+                    "target": target,
+                }),
+                None => json!({
+                    "statement": statement,
+                    "source": INTENT_SOURCE,
+                }),
+            };
             validate_document(&schema, &document, INTENT_ARTIFACT_TYPE)?;
 
             Ok(Some(ResolvedInvocationInput {
@@ -209,6 +216,87 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn resolve_invocation_input_authors_v2_intent_without_absent_target() {
+        let methodology_dir = unique_methodology_dir("intent-v2-without-target");
+        write_intent_methodology_fixture(&methodology_dir, "2.0.0");
+
+        let resolved = resolve_invocation_input(
+            &methodology_dir,
+            Some(&InvocationInput::IntentText {
+                statement: "Add a status page".to_string(),
+                target: None,
+            }),
+        )
+        .expect("v2 intent input should resolve")
+        .expect("intent input should materialize");
+
+        assert_eq!(resolved.artifact_type, "intent");
+        assert_eq!(resolved.artifact_id, "operator-input");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&resolved.document_json)
+                .expect("resolved intent should be valid JSON"),
+            json!({
+                "statement": "Add a status page",
+                "source": "operator",
+            })
+        );
+
+        fs::remove_dir_all(&methodology_dir).expect("temporary methodology dir should be removed");
+    }
+
+    #[test]
+    fn resolve_invocation_input_passes_v2_intent_target_verbatim() {
+        let methodology_dir = unique_methodology_dir("intent-v2-with-target");
+        write_intent_methodology_fixture(&methodology_dir, "2.0.0");
+
+        let resolved = resolve_invocation_input(
+            &methodology_dir,
+            Some(&InvocationInput::IntentText {
+                statement: "Work on the tracker item".to_string(),
+                target: Some("tesserine/agentd#154".to_string()),
+            }),
+        )
+        .expect("target-bearing v2 intent input should resolve")
+        .expect("intent input should materialize");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&resolved.document_json)
+                .expect("resolved intent should be valid JSON"),
+            json!({
+                "statement": "Work on the tracker item",
+                "source": "operator",
+                "target": "tesserine/agentd#154",
+            })
+        );
+
+        fs::remove_dir_all(&methodology_dir).expect("temporary methodology dir should be removed");
+    }
+
+    #[test]
+    fn resolve_invocation_input_rejects_legacy_intent_schema_version() {
+        let methodology_dir = unique_methodology_dir("intent-v1");
+        write_intent_methodology_fixture(&methodology_dir, "1.0.0");
+
+        let error = resolve_invocation_input(
+            &methodology_dir,
+            Some(&InvocationInput::IntentText {
+                statement: "Add a status page".to_string(),
+                target: None,
+            }),
+        )
+        .expect_err("legacy canonical intent schema should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("canonical intent version 1.0.0 is not supported"),
+            "expected unsupported-version message, got {error}"
+        );
+
+        fs::remove_dir_all(&methodology_dir).expect("temporary methodology dir should be removed");
+    }
+
+    #[test]
     fn resolve_invocation_input_accepts_single_segment_artifact_names() {
         let methodology_dir = unique_methodology_dir("single-segment");
         write_methodology_fixture(&methodology_dir, "claim");
@@ -307,6 +395,39 @@ mod tests {
 }"#,
         )
         .expect("artifact schema should be written");
+    }
+
+    fn write_intent_methodology_fixture(methodology_dir: &Path, version: &str) {
+        fs::create_dir_all(methodology_dir.join("schemas"))
+            .expect("methodology schemas dir should be created");
+        fs::write(
+            methodology_dir.join("manifest.toml"),
+            "[[artifact_types]]\nname = \"intent\"\n",
+        )
+        .expect("methodology manifest should be written");
+        fs::write(
+            methodology_dir.join("schemas/intent.schema.json"),
+            format!(
+                r#"{{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-tesserine-canonical": {{
+    "version": "{version}",
+    "schema_url": "https://example.com/intent.schema.json",
+    "prose_url": "https://example.com/INTENT.md"
+  }},
+  "type": "object",
+  "required": ["statement", "source"],
+  "additionalProperties": false,
+  "properties": {{
+    "statement": {{ "type": "string", "minLength": 1 }},
+    "source": {{ "type": "string", "minLength": 1 }},
+    "target": {{ "type": "string", "minLength": 1 }}
+  }}
+}}
+"#
+            ),
+        )
+        .expect("intent schema should be written");
     }
 
     fn unique_methodology_dir(name: &str) -> PathBuf {

@@ -724,7 +724,7 @@ fn binary_run_command_requires_artifact_type_when_artifact_file_is_supplied() {
     let artifact_path = runtime_dir.join("request.json");
     std::fs::write(
         &artifact_path,
-        r#"{"description":"Add a status page","source":"operator"}"#,
+        r#"{"statement":"Add a status page","source":"operator"}"#,
     )
     .expect("artifact file should be written");
 
@@ -804,7 +804,8 @@ fn binary_run_command_forwards_intent_text_as_typed_invocation_input() {
     assert_eq!(
         invocation.input,
         Some(InvocationInput::IntentText {
-            description: "Add a status page".to_string(),
+            statement: "Add a status page".to_string(),
+            target: None,
         })
     );
 }
@@ -829,7 +830,7 @@ fn binary_run_command_reads_artifact_file_and_forwards_structured_input() {
     let artifact_path = runtime_dir.join("intent.json");
     std::fs::write(
         &artifact_path,
-        r#"{"description":"Add a status page","source":"operator"}"#,
+        r#"{"statement":"Add a status page","source":"operator"}"#,
     )
     .expect("artifact file should be written");
     let (shutdown, handle, _config, invocations) =
@@ -871,7 +872,7 @@ fn binary_run_command_reads_artifact_file_and_forwards_structured_input() {
             artifact_type: "intent".to_string(),
             artifact_id: "intent".to_string(),
             document: json!({
-                "description": "Add a status page",
+                "statement": "Add a status page",
                 "source": "operator",
             }),
         })

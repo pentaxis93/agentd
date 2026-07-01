@@ -82,24 +82,12 @@ fn install_intent_schema(path: &Path, version: &str) {
     "prose_url": "https://example.com/INTENT.md"
   }},
   "type": "object",
-  "required": ["description", "source"],
+  "required": ["statement", "source"],
   "additionalProperties": false,
   "properties": {{
-    "description": {{ "type": "string", "minLength": 1 }},
+    "statement": {{ "type": "string", "minLength": 1 }},
     "source": {{ "type": "string", "minLength": 1 }},
-    "references": {{
-      "type": "array",
-      "minItems": 1,
-      "items": {{
-        "type": "object",
-        "required": ["kind", "ref"],
-        "additionalProperties": false,
-        "properties": {{
-          "kind": {{ "type": "string", "enum": ["ticket", "work-unit"] }},
-          "ref": {{ "type": "string", "minLength": 1 }}
-        }}
-      }}
-    }}
+    "target": {{ "type": "string", "minLength": 1 }}
   }}
 }}
 "#
@@ -212,7 +200,7 @@ fn materializes_intent_text_input_before_session_command_runs() {
 
     let fixture = SessionFixture::new("intent-input-run");
     write_methodology_manifest(&fixture.methodology_dir(), &["intent"]);
-    install_intent_schema(&fixture.methodology_dir(), "1.0.0");
+    install_intent_schema(&fixture.methodology_dir(), "2.0.0");
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
@@ -236,7 +224,8 @@ fn materializes_intent_text_input_before_session_command_runs() {
             repo_token: None,
             work_unit: None,
             input: Some(InvocationInput::IntentText {
-                description: "Add a status page".to_string(),
+                statement: "Add a status page".to_string(),
+                target: None,
             }),
             timeout: None,
         },
@@ -399,9 +388,9 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
 }
 
 #[test]
-fn rejects_intent_text_when_methodology_declares_an_unsupported_intent_version() {
+fn rejects_intent_text_when_methodology_declares_a_legacy_intent_version() {
     if skip_if_podman_unavailable(
-        "rejects_intent_text_when_methodology_declares_an_unsupported_intent_version",
+        "rejects_intent_text_when_methodology_declares_a_legacy_intent_version",
     ) {
         return;
     }
@@ -409,16 +398,16 @@ fn rejects_intent_text_when_methodology_declares_an_unsupported_intent_version()
         .lock()
         .expect("podman test lock should be acquired");
 
-    let fixture = SessionFixture::new("unsupported-intent-version-run");
+    let fixture = SessionFixture::new("legacy-intent-version-run");
     write_methodology_manifest(&fixture.methodology_dir(), &["intent"]);
-    install_intent_schema(&fixture.methodology_dir(), "2.0.0");
+    install_intent_schema(&fixture.methodology_dir(), "1.0.0");
     let image = fixture.build_image();
 
     let error = run_session_with_test_audit_root(
         &fixture.audit_root(),
         SessionSpec {
             daemon_instance_id: TEST_DAEMON_INSTANCE_ID.to_string(),
-            agent_name: "unsupported-intent-version-run".to_string(),
+            agent_name: "legacy-intent-version-run".to_string(),
             base_image: image,
             methodology_dir: fixture.methodology_dir(),
             audit_root: fixture.audit_root(),
@@ -432,7 +421,8 @@ fn rejects_intent_text_when_methodology_declares_an_unsupported_intent_version()
             repo_token: None,
             work_unit: None,
             input: Some(InvocationInput::IntentText {
-                description: "Add a status page".to_string(),
+                statement: "Add a status page".to_string(),
+                target: None,
             }),
             timeout: None,
         },
@@ -442,7 +432,7 @@ fn rejects_intent_text_when_methodology_declares_an_unsupported_intent_version()
     assert!(
         error
             .to_string()
-            .contains("canonical intent version 2.0.0 is not supported"),
+            .contains("canonical intent version 1.0.0 is not supported"),
         "expected unsupported-version error, got: {error}"
     );
 }
@@ -2678,8 +2668,12 @@ case "$command_name" in
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "assert-intent-input-present" ]; then
             [ -f "${HOME}/repo/.runa/workspace/intent/operator-input.json" ]
-            grep -F '"description":"Add a status page"' "${HOME}/repo/.runa/workspace/intent/operator-input.json"
+            grep -F '"statement":"Add a status page"' "${HOME}/repo/.runa/workspace/intent/operator-input.json"
             grep -F '"source":"operator"' "${HOME}/repo/.runa/workspace/intent/operator-input.json"
+            if grep -F '"target"' "${HOME}/repo/.runa/workspace/intent/operator-input.json"; then
+                echo "intent input unexpectedly contained target" >&2
+                exit 90
+            fi
             exit 0
         fi
 

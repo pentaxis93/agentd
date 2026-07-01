@@ -39,8 +39,11 @@ surfaces are the CLI and the audit record
 `input` is one of (externally tagged):
 
 ```json
-{"IntentText": {"description": "add a `greet(name)` function"}}
+{"IntentText": {"statement": "add a `greet(name)` function"}}
 ```
+
+`IntentText.target` is optional and, when present, is copied into the
+materialized intent artifact. There is no daemon CLI flag for `target`.
 
 ```json
 {"Artifact": {"artifact_type": "work-unit", "artifact_id": "issue-42", "document": { "...": "..." }}}
@@ -92,5 +95,5 @@ printf '{"type":"ping"}\n' | socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/agentd/agent
 ```
 
 ```json
-{"type":"run","agent":"site-builder","repo_url":"https://github.com/tesserine/example-hello","work_unit":null,"input":{"IntentText":{"description":"add a `greet(name)` function"}}}
+{"type":"run","agent":"site-builder","repo_url":"https://github.com/tesserine/example-hello","work_unit":null,"input":{"IntentText":{"statement":"add a `greet(name)` function"}}}
 ```

@@ -1084,7 +1084,7 @@ mod tests {
             Some(&ResolvedInvocationInput {
                 artifact_type: "intent".to_string(),
                 artifact_id: "operator-input".to_string(),
-                document_json: "{\"description\":\"Add a status page\",\"source\":\"operator\"}\n"
+                document_json: "{\"statement\":\"Add a status page\",\"source\":\"operator\"}\n"
                     .to_string(),
             }),
             &staging_dir,
@@ -1110,7 +1110,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(&document_path).expect("staged input document should be readable"),
-            "{\"description\":\"Add a status page\",\"source\":\"operator\"}\n"
+            "{\"statement\":\"Add a status page\",\"source\":\"operator\"}\n"
         );
         assert_eq!(mount.source, invocation_input_dir);
         assert_eq!(mount.target, PathBuf::from(INVOCATION_INPUT_MOUNT_PATH));

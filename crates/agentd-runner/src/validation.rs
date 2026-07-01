@@ -1567,7 +1567,8 @@ mod tests {
             (
                 None,
                 Some(InvocationInput::IntentText {
-                    description: "Add a status page".to_string(),
+                    statement: "Add a status page".to_string(),
+                    target: None,
                 }),
             ),
             (
@@ -1597,7 +1598,8 @@ mod tests {
             repo_token: None,
             work_unit: Some("issue-42".to_string()),
             input: Some(InvocationInput::IntentText {
-                description: "Add a status page".to_string(),
+                statement: "Add a status page".to_string(),
+                target: None,
             }),
             timeout: None,
         })

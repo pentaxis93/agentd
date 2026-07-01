@@ -246,8 +246,11 @@ fn resolve_invocation_input(
     artifact_file: Option<PathBuf>,
     artifact_type: Option<String>,
 ) -> Result<Option<InvocationInput>, Box<dyn std::error::Error>> {
-    if let Some(description) = intent {
-        return Ok(Some(InvocationInput::IntentText { description }));
+    if let Some(statement) = intent {
+        return Ok(Some(InvocationInput::IntentText {
+            statement,
+            target: None,
+        }));
     }
 
     let Some(path) = artifact_file else {
