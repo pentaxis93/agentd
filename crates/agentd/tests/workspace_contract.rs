@@ -68,6 +68,10 @@ fn first_line_number_containing_any(contents: &str, needles: &[&str]) -> Option<
         .map(|index| index + 1)
 }
 
+fn normalized_whitespace(contents: &str) -> String {
+    contents.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
 fn workspace_metadata_lists_only_grounded_crates() {
     let output = Command::new("cargo")
@@ -215,6 +219,42 @@ fn changelog_records_release_configuration_user_config_hardening() {
         changelog.contains("compliance-critical `cargo-release` behavior")
             && changelog.contains("user-level config"),
         "CHANGELOG.md should record the cargo-release user-config hardening"
+    );
+}
+
+#[test]
+fn operator_intent_documentation_describes_wish_and_run_intent_boundaries() {
+    let readme = read_workspace_file("README.md");
+    let quickstart = read_workspace_file("docs/quickstart.md");
+    let socket_protocol = read_workspace_file("docs/socket-protocol.md");
+    let architecture = read_workspace_file("ARCHITECTURE.md");
+    let changelog = read_workspace_file("CHANGELOG.md");
+
+    assert!(
+        readme.contains("agentd wish site-builder")
+            && readme.contains("agentd run --intent")
+            && readme.contains("operator-entered `target`"),
+        "README should document wish as the target-capable operator prompt and keep run --intent distinct"
+    );
+    assert!(
+        quickstart.contains("./target/release/agentd wish site-builder"),
+        "quickstart should use the operator-facing wish command"
+    );
+    assert!(
+        socket_protocol.contains("agentd wish")
+            && socket_protocol.contains("agentd run --intent")
+            && socket_protocol.contains("target prompt"),
+        "socket protocol docs should describe which CLI surface can populate IntentText.target"
+    );
+    assert!(
+        architecture.contains("agentd wish")
+            && architecture.contains("agentd run --intent")
+            && architecture.contains("optional target prompt"),
+        "ARCHITECTURE.md should describe the text-input target boundary"
+    );
+    assert!(
+        changelog.contains("`agentd wish` starts an intent-seeded session"),
+        "CHANGELOG.md should record the new operator-facing wish command"
     );
 }
 
@@ -512,14 +552,15 @@ fn architecture_describes_uniform_socket_intake_for_session_triggers() {
 #[test]
 fn workspace_docs_declare_same_build_socket_policy() {
     let readme = read_workspace_file("README.md");
+    let normalized_readme = normalized_whitespace(&readme);
     let architecture = read_workspace_file("ARCHITECTURE.md");
 
     assert!(
-        readme.contains("must restart the daemon after replacing the binary"),
+        normalized_readme.contains("must restart the daemon after replacing the binary"),
         "README should declare the restart requirement after replacing the binary"
     );
     assert!(
-        readme.contains("daemon and CLI must be the same build"),
+        normalized_readme.contains("daemon and CLI must be the same build"),
         "README should declare the same-build daemon/CLI requirement"
     );
     assert!(
@@ -531,8 +572,8 @@ fn workspace_docs_declare_same_build_socket_policy() {
         "architecture should declare the same-build daemon/CLI requirement"
     );
     assert!(
-        readme.contains("$XDG_RUNTIME_DIR/agentd/agentd.sock")
-            && readme.contains("does not fall back to `/tmp` or `/run`"),
+        normalized_readme.contains("$XDG_RUNTIME_DIR/agentd/agentd.sock")
+            && normalized_readme.contains("does not fall back to `/tmp` or `/run`"),
         "README should describe deterministic XDG socket resolution"
     );
     assert!(

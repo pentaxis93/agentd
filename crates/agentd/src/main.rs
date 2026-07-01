@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::{error::Error, fmt};
+use std::{io::BufRead, io::Write};
 
 use agentd::config::Config;
 use agentd::{
@@ -14,6 +15,9 @@ use clap::{Args, Parser, Subcommand};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
+const WISH_GREETING: &str = "Speak your wish.";
+const WISH_STATEMENT_PROMPT: &str = "What do you wish the agent to do?";
+const WISH_TARGET_PROMPT: &str = "What is this wish aimed at? Leave blank for prose only.";
 
 #[derive(Debug)]
 enum RunCommandError {
@@ -32,6 +36,7 @@ enum RunCommandError {
     ArtifactFileMissingStem {
         path: PathBuf,
     },
+    EmptyWishStatement,
 }
 
 impl fmt::Display for RunCommandError {
@@ -80,6 +85,9 @@ impl fmt::Display for RunCommandError {
                     path.display()
                 )
             }
+            Self::EmptyWishStatement => {
+                write!(f, "wish statement must not be empty")
+            }
         }
     }
 }
@@ -123,6 +131,17 @@ enum Command {
         artifact_file: Option<PathBuf>,
         #[arg(long, requires = "artifact_file")]
         artifact_type: Option<String>,
+    },
+    /// Greet the operator, elicit intent, and seed a session.
+    #[command(
+        display_name = "agentd",
+        after_help = "Prompts:\n  Speak your wish.\n  What do you wish the agent to do?\n  What is this wish aimed at? Leave blank for prose only."
+    )]
+    Wish {
+        agent: String,
+        repo: Option<String>,
+        #[arg(long)]
+        socket_path: Option<PathBuf>,
     },
 }
 
@@ -177,6 +196,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 artifact_type,
             )
         }
+        Some(Command::Wish {
+            agent,
+            repo,
+            socket_path,
+        }) => {
+            if cli.config.is_some() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--config is only supported for daemon mode, not `agentd wish`",
+                )));
+            }
+            run_wish_client(socket_path.as_deref(), agent, repo)
+        }
     }
 }
 
@@ -221,8 +253,36 @@ fn run_client(
     artifact_file: Option<PathBuf>,
     artifact_type: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = resolve_client_socket_path(explicit_socket_path)?;
     let input = resolve_invocation_input(intent, artifact_file, artifact_type)?;
+    run_client_with_input(explicit_socket_path, agent, repo, work_unit, input)
+}
+
+fn run_wish_client(
+    explicit_socket_path: Option<&std::path::Path>,
+    agent: String,
+    repo: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stdin = std::io::stdin().lock();
+    let mut stdout = std::io::stdout();
+    let (statement, target) = read_wish(&mut stdin, &mut stdout)?;
+
+    run_client_with_input(
+        explicit_socket_path,
+        agent,
+        repo,
+        None,
+        Some(InvocationInput::IntentText { statement, target }),
+    )
+}
+
+fn run_client_with_input(
+    explicit_socket_path: Option<&std::path::Path>,
+    agent: String,
+    repo: Option<String>,
+    work_unit: Option<String>,
+    input: Option<InvocationInput>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket_path = resolve_client_socket_path(explicit_socket_path)?;
     let outcome = request_run(
         &socket_path,
         &RunRequest {
@@ -239,6 +299,50 @@ fn run_client(
     } else {
         Err(Box::new(RunCommandError::Outcome(outcome)))
     }
+}
+
+fn read_wish<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+    writeln!(writer, "{WISH_GREETING}")?;
+    let statement = prompt_line(reader, writer, WISH_STATEMENT_PROMPT)?;
+    if statement.is_empty() {
+        return Err(Box::new(RunCommandError::EmptyWishStatement));
+    }
+
+    let target = prompt_line(reader, writer, WISH_TARGET_PROMPT)?;
+    let target = if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    };
+
+    Ok((statement, target))
+}
+
+fn prompt_line<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    prompt: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    writeln!(writer, "{prompt}")?;
+    writer.flush()?;
+
+    let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line)?;
+    if bytes_read == 0 {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "wish prompt reached end of input",
+        )));
+    }
+
+    while line.ends_with(['\n', '\r']) {
+        line.pop();
+    }
+
+    Ok(line)
 }
 
 fn resolve_invocation_input(

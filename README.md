@@ -42,12 +42,16 @@ injection, execution, and teardown. Startup reconciliation cleans stale
 resources from prior runs. Structured JSON tracing provides operational
 visibility.
 Agents may now declare a default repository and an optional cron schedule.
-Manual runs still flow through `agentd run`, and scheduled runs dispatch
-through the same daemon socket intake without introducing a separate job type.
-Manual runs may also carry per-invocation work input without modifying the
-agent: intent text can be synthesized into a canonical intent artifact, and
-complete JSON artifacts can be placed directly into the session workspace when
-the active methodology declares the relevant artifact type and schema.
+Manual operator sessions flow through `agentd wish` or `agentd run`, and
+scheduled runs dispatch through the same daemon socket intake without
+introducing a separate job type.
+Operators may also start an intent-seeded session with `agentd wish`, which
+prompts for the intent statement and optional target before dispatching through
+that same socket intake. Manual runs may carry per-invocation work input
+without modifying the agent: intent text can be synthesized into a canonical
+intent artifact, and complete JSON artifacts can be placed directly into the
+session workspace when the active methodology declares the relevant artifact
+type and schema.
 Agents may also declare additional bind mounts for host-managed state such as
 subscription auth directories. Independently of agent mounts, agentd now
 persists each session's audit record under the rootless default
@@ -265,7 +269,10 @@ explicitly so the daemon socket location is also a deliberate host mount.
 
 On SIGINT or SIGTERM, the daemon stops accepting connections and drains
 in-flight sessions; a second signal exits immediately.
-The Unix socket protocol is internal to `agentd` in `v0.1.x`: daemon and CLI must be the same build, and operators must restart the daemon after replacing the binary before using `agentd run` again. The wire format is documented in [docs/socket-protocol.md](docs/socket-protocol.md).
+The Unix socket protocol is internal to `agentd` in `v0.1.x`: daemon and CLI
+must be the same build, and operators must restart the daemon after replacing
+the binary before using `agentd wish` or `agentd run` again. The wire format is
+documented in [docs/socket-protocol.md](docs/socket-protocol.md).
 
 Trigger a session through the running daemon:
 
@@ -273,7 +280,19 @@ Trigger a session through the running daemon:
 agentd run site-builder --work-unit issue-42
 ```
 
-Manual invocation supports intake-mode and work-mode surfaces:
+For operator intent, use `wish`:
+
+```bash
+agentd wish site-builder
+```
+
+`wish` greets the operator and prompts for the statement and optional target.
+When the target prompt is left blank, agentd authors `{statement, source}`.
+When a target is supplied, agentd authors `{statement, target, source}` and
+passes the target through unchanged for the runtime to interpret.
+
+Manual invocation also supports lower-level intake-mode and work-mode
+surfaces:
 
 - `--work-unit <ID>` targets existing queued work
 - `--intent <TEXT>` synthesizes a canonical intent artifact at
@@ -317,9 +336,10 @@ Text input is methodology-gated. `--intent` is available only when the active
 methodology declares artifact type `intent`, ships `schemas/intent.schema.json`,
 and that schema advertises a supported canonical intent version through
 `x-tesserine-canonical.version`. In `agentd v0.1.x`, the supported set is
-`2.0.0` only. Text input is authored as `{statement, source}`; agentd adds no
-target CLI flag. Unsupported or undeclared intent support is rejected before
-the container is created.
+`2.0.0` only. `agentd wish` uses the same intent intake and may include an
+operator-entered `target`; `agentd run --intent` authors `{statement, source}`
+and has no target flag. Unsupported or undeclared intent support is rejected
+before the container is created.
 
 Artifact-file input is generic. The CLI reads the file locally, requires UTF-8
 JSON, derives the artifact id from the file stem, and sends structured JSON to
@@ -330,6 +350,7 @@ the artifact type in `manifest.toml` and ships a matching
 Examples:
 
 ```bash
+agentd wish site-builder
 agentd run site-builder --intent "Add a status page"
 agentd run site-builder --artifact-type claim --artifact-file ./claim.json
 agentd run site-builder --work-unit issue-42 --artifact-type work-unit --artifact-file ./issue-42.json
@@ -348,7 +369,7 @@ the container, the agent sees:
 - Credentials injected as environment variables
 - `GROUNDWORK_FORGE_TYPE` with the configured active forge type, defaulting to `github`
 - `AGENTD_WORK_UNIT` when the invocation includes one
-- A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `--intent` or `--artifact-file`
+- A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `wish`, `--intent`, or `--artifact-file`
 - `runa init` state followed by `runa run --agent-command -- <argv>` from the repo directory
 
 The container is force-removed on completion. The session's audit record

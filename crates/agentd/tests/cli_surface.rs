@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -435,6 +435,54 @@ fn binary_run_help_shows_socket_path_and_not_config() {
 }
 
 #[test]
+fn binary_top_level_help_shows_wish_operator_verb() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .arg("--help")
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        output.status.success(),
+        "help should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.contains("wish"),
+        "top-level help should advertise the wish operator verb: {stdout}"
+    );
+}
+
+#[test]
+fn binary_wish_help_shows_evocative_intent_prompting_surface() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["wish", "--help"])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        output.status.success(),
+        "wish help should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.contains("--socket-path"),
+        "wish help should advertise socket override: {stdout}"
+    );
+    assert!(
+        stdout.contains("What do you wish the agent to do?"),
+        "wish help should document the statement prompt: {stdout}"
+    );
+    assert!(
+        stdout.contains("What is this wish aimed at?"),
+        "wish help should document the optional target prompt: {stdout}"
+    );
+}
+
+#[test]
 fn binary_daemon_help_shows_config() {
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
         .args(["daemon", "--help"])
@@ -806,6 +854,152 @@ fn binary_run_command_forwards_intent_text_as_typed_invocation_input() {
         Some(InvocationInput::IntentText {
             statement: "Add a status page".to_string(),
             target: None,
+        })
+    );
+}
+
+#[test]
+fn binary_wish_command_prompts_and_forwards_prose_as_intent_text() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-wish-prose-input-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-wish-prose-input",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "wish",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
+            "site-builder",
+            "https://example.com/repo.git",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("agentd binary should spawn");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(b"Add a status page\n\n")
+        .expect("wish input should be written");
+    let output = child
+        .wait_with_output()
+        .expect("wish output should be available");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "wish command should succeed with prose input: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.contains("Speak your wish."),
+        "wish should greet the operator before prompting: {stdout}"
+    );
+    assert!(
+        stdout.contains("What do you wish the agent to do?"),
+        "wish should elicit an intent statement: {stdout}"
+    );
+    assert!(
+        stdout.contains("What is this wish aimed at?"),
+        "wish should elicit an optional target: {stdout}"
+    );
+
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(
+        invocation.input,
+        Some(InvocationInput::IntentText {
+            statement: "Add a status page".to_string(),
+            target: None,
+        })
+    );
+}
+
+#[test]
+fn binary_wish_command_forwards_target_bearing_intent_text_verbatim() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-wish-target-input-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-wish-target-input",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "wish",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
+            "site-builder",
+            "https://example.com/repo.git",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("agentd binary should spawn");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(b"Work the tracker item\ntesserine/agentd#152\n")
+        .expect("wish input should be written");
+    let output = child
+        .wait_with_output()
+        .expect("wish output should be available");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "wish command should succeed with target-bearing input: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(
+        invocation.input,
+        Some(InvocationInput::IntentText {
+            statement: "Work the tracker item".to_string(),
+            target: Some("tesserine/agentd#152".to_string()),
         })
     );
 }
