@@ -317,8 +317,9 @@ Text input is methodology-gated. `--intent` is available only when the active
 methodology declares artifact type `intent`, ships `schemas/intent.schema.json`,
 and that schema advertises a supported canonical intent version through
 `x-tesserine-canonical.version`. In `agentd v0.1.x`, the supported set is
-`1.0.0` only. Unsupported or undeclared intent support is rejected before the
-container is created.
+`2.0.0` only. Text input is authored as `{statement, source}`; agentd adds no
+target CLI flag. Unsupported or undeclared intent support is rejected before
+the container is created.
 
 Artifact-file input is generic. The CLI reads the file locally, requires UTF-8
 JSON, derives the artifact id from the file stem, and sends structured JSON to

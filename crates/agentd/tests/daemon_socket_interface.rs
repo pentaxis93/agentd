@@ -343,6 +343,60 @@ fn daemon_round_trips_typed_invocation_input_through_the_socket_protocol() {
 }
 
 #[test]
+fn daemon_round_trips_target_bearing_intent_text_through_the_socket_protocol() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("target-bearing-intent");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let (executor, invocations) =
+        RecordingInvocationExecutor::new(SessionOutcome::Success { exit_code: 0 });
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let outcome = request_run(
+        config.daemon(),
+        &RunRequest {
+            agent: "site-builder".to_string(),
+            repo_url: Some("https://example.com/repo.git".to_string()),
+            work_unit: None,
+            input: Some(InvocationInput::IntentText {
+                statement: "Work on the tracker item".to_string(),
+                target: Some("tesserine/agentd#154".to_string()),
+            }),
+        },
+    )
+    .expect("client request should succeed");
+
+    assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(
+        invocation.input,
+        Some(InvocationInput::IntentText {
+            statement: "Work on the tracker item".to_string(),
+            target: Some("tesserine/agentd#154".to_string()),
+        })
+    );
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
 fn daemon_round_trips_work_unit_artifact_input_through_the_socket_protocol() {
     let _guard = env_lock()
         .lock()
@@ -424,7 +478,8 @@ fn daemon_rejects_conflicting_work_unit_and_input_from_socket_callers() {
             repo_url: Some("https://example.com/repo.git".to_string()),
             work_unit: Some("issue-42".to_string()),
             input: Some(InvocationInput::IntentText {
-                description: "Add a status page".to_string(),
+                statement: "Add a status page".to_string(),
+                target: None,
             }),
         },
     )
