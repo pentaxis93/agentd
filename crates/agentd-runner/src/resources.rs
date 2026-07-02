@@ -431,8 +431,14 @@ fn create_prepared_bind_mount(
     read_only: bool,
     relabel_shared: bool,
 ) -> Result<PreparedBindMount, RunnerError> {
-    let canonical_source = canonical_mount_source(source)?;
-    create_path_symlink(&canonical_source, &staged_source)?;
+    // Operator-declared additional-mount sources are resolved by the host
+    // Podman that performs the bind mount, not by the daemon's own filesystem
+    // namespace. Canonicalizing here would stat the source against the daemon
+    // container's mounts and reject host paths the host Podman resolves fine on
+    // a containerized-daemon deployment, so the staged alias points at the
+    // source as declared — validated absolute upstream — and existence is
+    // deferred to the host boundary that owns the mount.
+    create_path_symlink(source, &staged_source)?;
     Ok(PreparedBindMount {
         source: staged_source,
         target,
@@ -1018,28 +1024,37 @@ mod tests {
     }
 
     #[test]
-    fn prepare_session_resources_rejects_missing_additional_mount_sources() {
+    fn prepare_session_resources_accepts_additional_mount_sources_absent_from_daemon_namespace() {
+        // On a containerized-daemon deployment the operator-declared mount
+        // source lives on the host but not in the daemon container's own
+        // filesystem namespace. A path absent from this process's namespace
+        // stands in for that case: the daemon must accept it and defer
+        // existence to the host Podman that performs the bind mount, staging
+        // the source as a symlink alias resolved on the host at mount time.
         let _guard = fake_podman_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let fixture = FakePodmanFixture::new();
         let methodology_dir = fixture.create_methodology_dir("runner-methodology");
-        let missing_mount_source = std::env::temp_dir().join(format!(
-            "agentd-runner-missing-mount-{}-{}",
+        let host_only_mount_source = std::env::temp_dir().join(format!(
+            "agentd-runner-host-only-mount-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time should be after the unix epoch")
                 .as_nanos()
         ));
-        let session_id = format!("session-missing-mount-{}", std::process::id());
+        // Deliberately not created: absent from the daemon's own namespace.
+        let session_id = format!("session-host-only-mount-{}", std::process::id());
+        let audit_record = test_audit_record(&session_id);
+        let audit_record_dir = audit_record.record_dir.clone();
 
-        let result = prepare_session_resources(
+        let resources = prepare_session_resources(
             "agentd-agent-session",
             &crate::SessionSpec {
                 methodology_dir,
                 mounts: vec![BindMount {
-                    source: missing_mount_source.clone(),
+                    source: host_only_mount_source.clone(),
                     target: PathBuf::from("/mnt/readonly"),
                     read_only: true,
                 }],
@@ -1053,19 +1068,26 @@ mod tests {
                 timeout: None,
             },
             &session_id,
-            test_audit_record(&session_id),
+            audit_record,
             None,
+        )
+        .expect("additional mount sources resolvable only on the host must be accepted");
+
+        assert_eq!(resources.additional_mounts.len(), 1);
+        let mount = &resources.additional_mounts[0];
+        assert_eq!(mount.target, PathBuf::from("/mnt/readonly"));
+        assert!(mount.read_only);
+        assert!(!mount.relabel_shared);
+        let alias_target = fs::read_link(&mount.source)
+            .expect("staged additional mount source should be a symlink alias");
+        assert_eq!(
+            alias_target, host_only_mount_source,
+            "the alias must point at the operator-declared source; the host Podman resolves it"
         );
 
-        match result
-            .expect_err("missing mount sources should be rejected")
-            .allocation_error
-        {
-            RunnerError::MissingMountSource { path } => {
-                assert_eq!(path, missing_mount_source);
-            }
-            other => panic!("expected MissingMountSource, got {other:?}"),
-        }
+        fs::remove_dir_all(&resources.methodology_staging_dir)
+            .expect("temporary staging dir should be removed");
+        fs::remove_dir_all(&audit_record_dir).expect("temporary audit record should be removed");
     }
 
     #[test]
