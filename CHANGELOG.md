@@ -76,6 +76,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Operator-declared additional bind-mount sources are no longer canonicalized
+  in the daemon's own filesystem namespace. On a containerized-daemon
+  deployment that namespace holds only the daemon's own mounts, so a host
+  source declared in `[[agents.mounts]]` but absent from the daemon container
+  was rejected with `mount source path does not exist` even though the host
+  Podman that performs the bind mount resolves it. Additional-mount sources are
+  now staged as aliases pointing at the source as declared, with existence
+  deferred to the host boundary that owns the mount; daemon-internal mounts
+  (methodology, audit, transcript, invocation-input) still canonicalize
+  unchanged (#158).
 - README deployment examples reference the released `v0.1.2` tag (they
   were pinned to `v0.1.2-rc.1`).
 

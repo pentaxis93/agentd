@@ -54,11 +54,15 @@ service:
 | Runner staging directory | daemon process writes; host Podman resolves staged bind sources | The path named by `TMPDIR` must exist at the same absolute path for the daemon container and host Podman. The image default requires host `/var/lib/agentd/tmp` mounted to container `/var/lib/agentd/tmp`, or a changed `TMPDIR` exposed identically on both sides. |
 
 The path split follows directly from the current runner implementation. The
-daemon process validates and canonicalizes methodology, audit, additional
-mount, invocation-input, and staging paths, then sends bind-mount source
+daemon process validates and canonicalizes methodology, audit,
+invocation-input, and staging paths, then sends bind-mount source
 strings to the host Podman service. Runner-owned relabelled sources are passed
 as direct canonical host paths so Podman's SELinux relabel operation applies to
 the real source tree; operator-declared mounts continue to use staged aliases.
+Operator-declared additional-mount sources are not canonicalized in the daemon
+namespace: the alias points at the source as declared, and existence is
+resolved by the host Podman that performs the mount, so a host source absent
+from the daemon container's own filesystem view is still accepted.
 Runner-owned relabelled sources containing both `,` and `:` are rejected
 because neither Podman's comma-delimited `--mount` form nor its colon-delimited
 `--volume` fallback can encode that path unambiguously.
@@ -254,9 +258,11 @@ From inside the environment, an agent should see:
 Additional bind mounts are declared in agent configuration as `source`,
 `target`, and `read_only`. agentd validates absolute container targets plus a
 per-agent disjointness invariant: target paths must be unique and no target
-may be a path-component prefix of another. It then stages canonical host
-sources through runner-managed symlinks before calling Podman so additional
-mounts stay separate from runner-owned relabel handling. Subscription auth is
+may be a path-component prefix of another. It then stages operator-declared
+host sources through runner-managed symlinks before calling Podman so additional
+mounts stay separate from runner-owned relabel handling; the host Podman
+resolves each aliased source at mount time, so a source that exists on the host
+but not in the daemon container's own namespace is accepted. Subscription auth is
 the first read-only consumer of this mechanism; persistent audit storage in
 `#76` builds on the same path with read-write mounts. Additional mounts are not
 relabelled; on SELinux-enabled hosts, operators must pre-label those host paths
