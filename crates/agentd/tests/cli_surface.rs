@@ -425,6 +425,12 @@ fn binary_run_help_shows_socket_path_and_not_config() {
         "run help should advertise socket override: {stdout}"
     );
     assert!(
+        stdout.contains("--progress <PROGRESS>")
+            && stdout.contains("summary")
+            && stdout.contains("full"),
+        "run help should document live progress verbosity: {stdout}"
+    );
+    assert!(
         !stdout.contains("--config"),
         "run help should not advertise daemon config coupling: {stdout}"
     );
@@ -477,8 +483,14 @@ fn binary_wish_help_shows_evocative_intent_prompting_surface() {
         "wish help should describe the wish session boundary exactly: {stdout}"
     );
     assert!(
+        stdout.contains("--progress <PROGRESS>")
+            && stdout.contains("summary")
+            && stdout.contains("full"),
+        "wish help should document live progress verbosity: {stdout}"
+    );
+    assert!(
         stdout.contains(
-            "Prompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
+            "Live observation:\n  agentd wish streams concise session progress by default. Use --progress full for every available progress field.\n\nPrompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
         ),
         "wish help should document the exact prompt block: {stdout}"
     );
@@ -1311,11 +1323,10 @@ fn binary_run_command_exits_non_zero_and_reports_failed_sessions_on_stderr() {
         !output.status.success(),
         "run command should fail when the daemon reports a failed session"
     );
-    assert!(
-        String::from_utf8(output.stdout)
-            .expect("stdout should be valid UTF-8")
-            .is_empty(),
-        "failed run should not print a success-style stdout message"
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "session running: site-builder\n",
+        "failed run should print only live progress on stdout"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
@@ -1366,11 +1377,10 @@ fn binary_run_command_exits_non_zero_and_reports_timed_out_sessions_on_stderr() 
         !output.status.success(),
         "run command should fail when the daemon reports a timed-out session"
     );
-    assert!(
-        String::from_utf8(output.stdout)
-            .expect("stdout should be valid UTF-8")
-            .is_empty(),
-        "timed-out run should not print a success-style stdout message"
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "session running: site-builder\n",
+        "timed-out run should print only live progress on stdout"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
@@ -1427,11 +1437,10 @@ fn binary_run_command_exits_non_zero_and_reports_signal_terminated_sessions_on_s
         !output.status.success(),
         "run command should fail when the daemon reports a signal-terminated session"
     );
-    assert!(
-        String::from_utf8(output.stdout)
-            .expect("stdout should be valid UTF-8")
-            .is_empty(),
-        "signal-terminated run should not print a success-style stdout message"
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        "session running: site-builder\n",
+        "signal-terminated run should print only live progress on stdout"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("stderr should be valid UTF-8");
@@ -1486,7 +1495,7 @@ fn binary_run_command_exits_zero_and_reports_blocked_sessions_on_stdout() {
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
-        "session blocked\n"
+        "session running: site-builder\nsession blocked\n"
     );
     assert!(
         String::from_utf8(output.stderr)
@@ -1541,7 +1550,7 @@ fn binary_run_command_exits_zero_and_reports_nothing_ready_sessions_on_stdout() 
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
-        "session nothing_ready\n"
+        "session running: site-builder\nsession nothing_ready\n"
     );
     assert!(
         String::from_utf8(output.stderr)
@@ -1608,7 +1617,7 @@ argv = ["site-builder", "exec"]
     );
     assert_eq!(
         String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
-        "session success\n"
+        "session running: site-builder\nsession success\n"
     );
     assert_eq!(
         invocations.lock().expect("invocations should lock")[0].repo_url,

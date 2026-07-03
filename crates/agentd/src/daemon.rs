@@ -17,9 +17,10 @@ use agentd_runner::{
 
 use crate::audit_root::prepare_audit_root;
 use crate::config::{Config, ConfigError};
-use crate::protocol::{RequestMessage, ResponseMessage};
+use crate::dispatch::dispatch_run_after_preflight;
+use crate::protocol::{ProgressMessage, RequestMessage, ResponseMessage};
 use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
-use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
+use crate::{DispatchError, RunRequest, SessionExecutor};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
 const RUNTIME_DIR_MODE: u32 = 0o700;
@@ -81,6 +82,15 @@ pub enum ClientError {
     Io(io::Error),
     Protocol(serde_json::Error),
     Server { message: String },
+}
+
+/// Client-side rendering level for live session observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveObservationLevel {
+    /// Print concise lifecycle markers while waiting for the terminal outcome.
+    Summary,
+    /// Print lifecycle markers with every field carried by the progress frame.
+    Full,
 }
 
 impl fmt::Display for ClientError {
@@ -341,19 +351,41 @@ pub fn request_run(
     socket_path: impl AsRef<Path>,
     request: &RunRequest,
 ) -> Result<SessionOutcome, ClientError> {
+    request_run_inner::<io::Sink>(socket_path.as_ref(), request, None)
+}
+
+/// Trigger a run and render daemon progress messages while waiting.
+pub fn request_run_with_live_observation<W: Write>(
+    socket_path: impl AsRef<Path>,
+    request: &RunRequest,
+    level: LiveObservationLevel,
+    writer: &mut W,
+) -> Result<SessionOutcome, ClientError> {
+    request_run_inner(socket_path.as_ref(), request, Some((level, writer)))
+}
+
+fn request_run_inner<W: Write>(
+    socket_path: &Path,
+    request: &RunRequest,
+    observer: Option<(LiveObservationLevel, &mut W)>,
+) -> Result<SessionOutcome, ClientError> {
     match send_request(
-        socket_path.as_ref(),
+        socket_path,
         &RequestMessage::Run {
             agent: request.agent.clone(),
             repo_url: request.repo_url.clone(),
             work_unit: request.work_unit.clone(),
             input: request.input.clone(),
         },
+        observer,
     )? {
         ResponseMessage::SessionOutcome { outcome } => Ok(outcome.into()),
         ResponseMessage::Error { message } => Err(ClientError::Server { message }),
         ResponseMessage::Pong => Err(ClientError::Server {
             message: "unexpected pong from daemon".to_string(),
+        }),
+        ResponseMessage::Progress { .. } => Err(ClientError::Server {
+            message: "daemon closed the connection before reporting a terminal outcome".to_string(),
         }),
     }
 }
@@ -373,14 +405,15 @@ pub(crate) fn request_run_without_waiting(
     )
 }
 
-fn send_request(
+fn send_request<W: Write>(
     socket_path: &Path,
     request: &RequestMessage,
+    observer: Option<(LiveObservationLevel, &mut W)>,
 ) -> Result<ResponseMessage, ClientError> {
     let mut stream = connect_to_daemon(socket_path)?;
     write_request(&mut stream, request)?;
 
-    read_response(stream)
+    read_terminal_response(stream, observer)
 }
 
 fn send_request_without_response(
@@ -416,17 +449,75 @@ fn write_request(stream: &mut UnixStream, request: &RequestMessage) -> Result<()
     Ok(())
 }
 
-fn read_response(stream: UnixStream) -> Result<ResponseMessage, ClientError> {
+fn read_terminal_response<W: Write>(
+    stream: UnixStream,
+    mut observer: Option<(LiveObservationLevel, &mut W)>,
+) -> Result<ResponseMessage, ClientError> {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line)?;
-    if bytes_read == 0 {
-        return Err(ClientError::Server {
-            message: "daemon closed the connection without a response".to_string(),
-        });
-    }
+    let mut saw_message = false;
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            let message = if saw_message {
+                "daemon closed the connection before reporting a terminal outcome"
+            } else {
+                "daemon closed the connection without a response"
+            };
+            return Err(ClientError::Server {
+                message: message.to_string(),
+            });
+        }
+        saw_message = true;
 
-    Ok(serde_json::from_str(&line)?)
+        let response = serde_json::from_str(&line)?;
+        match response {
+            ResponseMessage::Progress { progress } => {
+                if let Some((level, writer)) = observer.as_mut() {
+                    render_progress(progress, *level, &mut **writer)?;
+                }
+            }
+            terminal => return Ok(terminal),
+        }
+    }
+}
+
+fn render_progress<W: Write>(
+    progress: ProgressMessage,
+    level: LiveObservationLevel,
+    writer: &mut W,
+) -> Result<(), ClientError> {
+    match (progress, level) {
+        (
+            ProgressMessage::DispatchStarted {
+                agent, work_unit, ..
+            },
+            LiveObservationLevel::Summary,
+        ) => {
+            if let Some(work_unit) = work_unit {
+                writeln!(writer, "session running: {agent} ({work_unit})")?;
+            } else {
+                writeln!(writer, "session running: {agent}")?;
+            }
+        }
+        (
+            ProgressMessage::DispatchStarted {
+                agent,
+                work_unit,
+                input_present,
+            },
+            LiveObservationLevel::Full,
+        ) => {
+            writeln!(
+                writer,
+                "session running: agent={agent} work_unit={} input={}",
+                work_unit.as_deref().unwrap_or("-"),
+                if input_present { "present" } else { "absent" }
+            )?;
+        }
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
@@ -473,33 +564,51 @@ fn handle_connection_inner(
             repo_url,
             work_unit,
             input,
-        } => match dispatch_run(
-            config,
-            &RunRequest {
-                agent: agent.clone(),
-                repo_url,
-                work_unit: work_unit.clone(),
-                input,
-            },
-            executor,
-        ) {
-            Ok(outcome) => {
-                log_manual_run_completed(&agent, work_unit.as_deref(), &outcome);
-                ResponseMessage::SessionOutcome {
-                    outcome: outcome.into(),
+        } => {
+            let progress = ResponseMessage::Progress {
+                progress: ProgressMessage::DispatchStarted {
+                    agent: agent.clone(),
+                    work_unit: work_unit.clone(),
+                    input_present: input.is_some(),
+                },
+            };
+            match dispatch_run_after_preflight(
+                config,
+                &RunRequest {
+                    agent: agent.clone(),
+                    repo_url,
+                    work_unit: work_unit.clone(),
+                    input,
+                },
+                executor,
+                || {
+                    if let Err(error) = write_response(&mut stream, &progress) {
+                        tracing::warn!(
+                            event = "agentd.manual_run_progress_failed",
+                            error = %error,
+                            "failed to write manual run progress"
+                        );
+                    }
+                },
+            ) {
+                Ok(outcome) => {
+                    log_manual_run_completed(&agent, work_unit.as_deref(), &outcome);
+                    ResponseMessage::SessionOutcome {
+                        outcome: outcome.into(),
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "agentd.manual_run_rejected",
+                        error = %error,
+                        "run request rejected"
+                    );
+                    ResponseMessage::Error {
+                        message: dispatch_error_message(&error),
+                    }
                 }
             }
-            Err(error) => {
-                tracing::warn!(
-                    event = "agentd.manual_run_rejected",
-                    error = %error,
-                    "run request rejected"
-                );
-                ResponseMessage::Error {
-                    message: dispatch_error_message(&error),
-                }
-            }
-        },
+        }
     };
 
     write_response(&mut stream, &response)

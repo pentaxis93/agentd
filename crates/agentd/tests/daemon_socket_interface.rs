@@ -9,13 +9,32 @@ use std::time::{Duration, Instant};
 use agentd::config::{Config, ConfigError};
 use agentd::daemon::run_daemon_until_shutdown_with_reconciler;
 use agentd::{
-    ClientError, DaemonError, RunRequest, RunnerSessionExecutor, SessionExecutor, request_run,
+    ClientError, DaemonError, LiveObservationLevel, RunRequest, RunnerSessionExecutor,
+    SessionExecutor, request_run, request_run_with_live_observation,
 };
 use agentd_runner::InvocationInput;
 use agentd_runner::{
     RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
 };
 use serde_json::json;
+
+struct ChannelWriter {
+    tx: mpsc::Sender<String>,
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf).to_string();
+        self.tx
+            .send(text)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "receiver closed"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -251,6 +270,88 @@ fn daemon_reports_run_outcome_back_through_client_request() {
     .expect("client request should succeed");
 
     assert_eq!(outcome, SessionOutcome::GenericFailure { exit_code: 23 });
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
+fn client_receives_live_progress_before_session_outcome() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("live-progress");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let executor = BlockingFirstRunExecutor::new(
+        SessionOutcome::Success { exit_code: 0 },
+        SessionOutcome::Success { exit_code: 0 },
+    );
+    let daemon_executor = executor.clone();
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let client_config = config.clone();
+    let client_request = thread::spawn(move || {
+        let mut writer = ChannelWriter { tx: progress_tx };
+        request_run_with_live_observation(
+            client_config.daemon(),
+            &RunRequest {
+                agent: "site-builder".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
+                work_unit: Some("issue-122".to_string()),
+                input: None,
+            },
+            LiveObservationLevel::Summary,
+            &mut writer,
+        )
+    });
+
+    let mut progress = String::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !progress.ends_with('\n') {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "live progress should reach the client before the session completes"
+        );
+        progress.push_str(
+            &progress_rx
+                .recv_timeout(remaining)
+                .expect("live progress should reach the client before the session completes"),
+        );
+    }
+    assert!(
+        progress.contains("session running: site-builder (issue-122)"),
+        "unexpected progress output: {progress}"
+    );
+    assert!(
+        !client_request.is_finished(),
+        "client should still be waiting for the terminal outcome after progress arrives"
+    );
+
+    executor.release_first_run();
+    assert_eq!(
+        client_request
+            .join()
+            .expect("client request thread should join")
+            .expect("client request should succeed"),
+        SessionOutcome::Success { exit_code: 0 }
+    );
 
     shutdown.store(true, Ordering::Release);
     handle

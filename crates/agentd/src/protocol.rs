@@ -30,19 +30,33 @@ pub(crate) enum RequestMessage {
     },
 }
 
-/// Daemon → client. Exactly one is written per accepted request, then the
-/// connection closes.
+/// Daemon → client. A run request may emit zero or more progress messages
+/// before its terminal outcome or error message, then the connection closes.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ResponseMessage {
     /// Answer to [`RequestMessage::Ping`].
     Pong,
+    /// Human-observable progress for a running session.
+    Progress { progress: ProgressMessage },
     /// The session ran to a terminal outcome (which may be a failure
     /// outcome — transport success, not work success).
     SessionOutcome { outcome: OutcomeMessage },
     /// The request was rejected before a session outcome existed:
     /// malformed JSON, unknown agent, or dispatch failure.
     Error { message: String },
+}
+
+/// Non-terminal session progress.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub(crate) enum ProgressMessage {
+    /// The daemon accepted the request and is dispatching it to the runner.
+    DispatchStarted {
+        agent: String,
+        work_unit: Option<String>,
+        input_present: bool,
+    },
 }
 
 /// Terminal session outcome.
