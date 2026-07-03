@@ -1,12 +1,14 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -28,7 +30,8 @@ const RUNTIME_DIR_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 const MAX_PROGRESS_FRAME_BYTES: usize = 128 * 1024;
-const TERMINAL_RESPONSE_RESERVE_BYTES: usize = 16 * 1024;
+const PROGRESS_QUEUE_CAPACITY: usize = 64;
+const PROGRESS_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -625,100 +628,74 @@ fn handle_connection_inner(
             work_unit,
             input,
         } => {
-            let stream = Mutex::new(&mut stream);
-            let dispatch_progress = ResponseMessage::Progress {
-                progress: ProgressMessage::DispatchStarted {
-                    agent: agent.clone(),
-                    work_unit: work_unit.clone(),
-                    input_present: input.is_some(),
-                },
+            return handle_run_connection(
+                stream, config, executor, agent, repo_url, work_unit, input,
+            );
+        }
+    };
+
+    write_response(&mut stream, &response)
+}
+
+fn handle_run_connection(
+    stream: UnixStream,
+    config: &Config,
+    executor: &impl SessionExecutor,
+    agent: String,
+    repo_url: Option<String>,
+    work_unit: Option<String>,
+    input: Option<agentd_runner::InvocationInput>,
+) -> Result<(), io::Error> {
+    let writer = ProgressWriter::spawn(stream)?;
+    let response = {
+        let dispatch_progress = ResponseMessage::Progress {
+            progress: ProgressMessage::DispatchStarted {
+                agent: agent.clone(),
+                work_unit: work_unit.clone(),
+                input_present: input.is_some(),
+            },
+        };
+        let write_progress = |event: SessionProgressEvent| {
+            let SessionProgressEvent::TranscriptEvent { session_id, line } = event;
+            let progress = ResponseMessage::Progress {
+                progress: ProgressMessage::TranscriptEvent { session_id, line },
             };
-            let write_progress = |event: SessionProgressEvent| {
-                let SessionProgressEvent::TranscriptEvent { session_id, line } = event;
-                let progress = ResponseMessage::Progress {
-                    progress: ProgressMessage::TranscriptEvent { session_id, line },
-                };
-                match stream.try_lock() {
-                    Ok(mut stream) => {
-                        if let Err(error) = try_write_progress_response(&mut stream, &progress) {
-                            tracing::warn!(
-                                event = "agentd.manual_run_progress_failed",
-                                error = %error,
-                                "failed to write manual run progress"
-                            );
-                        }
-                    }
-                    Err(TryLockError::WouldBlock) => {
-                        tracing::debug!(
-                            event = "agentd.manual_run_progress_dropped",
-                            "dropped manual run progress while another response was in flight"
-                        );
-                    }
-                    Err(TryLockError::Poisoned(_)) => {
-                        tracing::warn!(
-                            event = "agentd.manual_run_progress_lock_poisoned",
-                            "failed to lock manual run progress stream"
-                        );
-                    }
+            writer.enqueue_progress(progress);
+        };
+        match dispatch_run_after_preflight(
+            config,
+            &RunRequest {
+                agent: agent.clone(),
+                repo_url,
+                work_unit: work_unit.clone(),
+                input,
+            },
+            executor,
+            || {
+                writer.enqueue_dispatch_progress(dispatch_progress);
+            },
+            &write_progress,
+        ) {
+            Ok(outcome) => {
+                log_manual_run_completed(&agent, work_unit.as_deref(), &outcome);
+                ResponseMessage::SessionOutcome {
+                    outcome: outcome.into(),
                 }
-            };
-            match dispatch_run_after_preflight(
-                config,
-                &RunRequest {
-                    agent: agent.clone(),
-                    repo_url,
-                    work_unit: work_unit.clone(),
-                    input,
-                },
-                executor,
-                || match stream.try_lock() {
-                    Ok(mut stream) => {
-                        if let Err(error) =
-                            try_write_progress_response(&mut stream, &dispatch_progress)
-                        {
-                            tracing::warn!(
-                                event = "agentd.manual_run_progress_failed",
-                                error = %error,
-                                "failed to write manual run progress"
-                            );
-                        }
-                    }
-                    Err(TryLockError::WouldBlock) => {
-                        tracing::debug!(
-                            event = "agentd.manual_run_progress_dropped",
-                            "dropped manual run progress while another response was in flight"
-                        );
-                    }
-                    Err(TryLockError::Poisoned(_)) => {
-                        tracing::warn!(
-                            event = "agentd.manual_run_progress_lock_poisoned",
-                            "failed to lock manual run progress stream"
-                        );
-                    }
-                },
-                &write_progress,
-            ) {
-                Ok(outcome) => {
-                    log_manual_run_completed(&agent, work_unit.as_deref(), &outcome);
-                    ResponseMessage::SessionOutcome {
-                        outcome: outcome.into(),
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        event = "agentd.manual_run_rejected",
-                        error = %error,
-                        "run request rejected"
-                    );
-                    ResponseMessage::Error {
-                        message: dispatch_error_message(&error),
-                    }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_rejected",
+                    error = %error,
+                    "run request rejected"
+                );
+                ResponseMessage::Error {
+                    message: dispatch_error_message(&error),
                 }
             }
         }
     };
 
-    write_response(&mut stream, &response)
+    writer.finish(response)
 }
 
 fn write_response(stream: &mut UnixStream, response: &ResponseMessage) -> Result<(), io::Error> {
@@ -741,119 +718,267 @@ fn write_response_part(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), io::
     }
 }
 
-fn try_write_progress_response(
-    stream: &mut UnixStream,
-    response: &ResponseMessage,
-) -> Result<(), io::Error> {
+fn serialize_response_frame(response: &ResponseMessage) -> Result<Vec<u8>, io::Error> {
     let mut payload = serde_json::to_vec(response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     payload.push(b'\n');
-    if payload.len() > MAX_PROGRESS_FRAME_BYTES {
-        tracing::debug!(
-            event = "agentd.manual_run_progress_dropped",
-            frame_bytes = payload.len(),
-            max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
-            "dropped oversized manual run progress frame"
-        );
-        return Ok(());
+    Ok(payload)
+}
+
+#[derive(Clone)]
+struct ProgressWriter {
+    shared: Arc<ProgressWriterShared>,
+}
+
+struct ProgressWriterShared {
+    state: Mutex<ProgressWriterState>,
+    available: Condvar,
+}
+
+struct ProgressWriterState {
+    progress: VecDeque<QueuedProgressFrame>,
+    terminal: Option<Vec<u8>>,
+    closed: bool,
+}
+
+struct QueuedProgressFrame {
+    bytes: Vec<u8>,
+    deliver_before_terminal: bool,
+}
+
+enum ProgressWriterFrame {
+    Progress(Vec<u8>),
+    Terminal(Vec<u8>),
+}
+
+impl ProgressWriter {
+    fn spawn(stream: UnixStream) -> Result<Self, io::Error> {
+        stream.set_write_timeout(Some(PROGRESS_WRITE_TIMEOUT))?;
+        let shared = Arc::new(ProgressWriterShared {
+            state: Mutex::new(ProgressWriterState {
+                progress: VecDeque::new(),
+                terminal: None,
+                closed: false,
+            }),
+            available: Condvar::new(),
+        });
+        let writer_shared = Arc::clone(&shared);
+        thread::spawn(move || {
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                run_progress_writer(stream, writer_shared);
+            }));
+            if result.is_err() {
+                tracing::error!(
+                    event = "agentd.manual_run_progress_writer_panicked",
+                    "manual run progress writer panicked"
+                );
+            }
+        });
+
+        Ok(Self { shared })
     }
 
-    if !progress_frame_has_reserved_capacity(stream, payload.len())? {
-        tracing::debug!(
-            event = "agentd.manual_run_progress_dropped",
-            frame_bytes = payload.len(),
-            terminal_reserve_bytes = TERMINAL_RESPONSE_RESERVE_BYTES,
-            "dropped manual run progress frame because the client connection is backpressured"
-        );
-        return Ok(());
+    fn enqueue_progress(&self, response: ResponseMessage) {
+        self.enqueue_progress_frame(response, false);
     }
 
-    stream.set_nonblocking(true)?;
-    let write_result = write_progress_frame_nonblocking(stream, &payload);
-    let restore_result = stream.set_nonblocking(false);
-
-    match (write_result, restore_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) if peer_disconnected_during_response(&error) => Ok(()),
-        (Err(error), Ok(())) if progress_response_would_block(&error) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Err(write_error), Err(restore_error)) => {
-            tracing::warn!(
-                event = "agentd.manual_run_progress_blocking_restore_failed",
-                error = %restore_error,
-                "failed to restore blocking mode after manual run progress write"
+    fn enqueue_dispatch_progress(&self, response: ResponseMessage) {
+        let frame = match serialize_response_frame(&response) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_serialization_failed",
+                    error = %error,
+                    "failed to serialize manual run dispatch progress"
+                );
+                return;
+            }
+        };
+        if frame.len() > MAX_PROGRESS_FRAME_BYTES {
+            tracing::debug!(
+                event = "agentd.manual_run_progress_dropped",
+                frame_bytes = frame.len(),
+                max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
+                "dropped oversized manual run dispatch progress frame"
             );
-            Err(write_error)
+            return;
+        }
+
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed || state.terminal.is_some() {
+            tracing::debug!(
+                event = "agentd.manual_run_progress_dropped",
+                "dropped manual run dispatch progress after terminal response was queued"
+            );
+            return;
+        }
+
+        state.progress.push_back(QueuedProgressFrame {
+            bytes: frame,
+            deliver_before_terminal: true,
+        });
+        self.shared.available.notify_one();
+    }
+
+    fn enqueue_progress_frame(&self, response: ResponseMessage, deliver_before_terminal: bool) {
+        let frame = match serialize_response_frame(&response) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_serialization_failed",
+                    error = %error,
+                    "failed to serialize manual run progress"
+                );
+                return;
+            }
+        };
+
+        if frame.len() > MAX_PROGRESS_FRAME_BYTES {
+            tracing::debug!(
+                event = "agentd.manual_run_progress_dropped",
+                frame_bytes = frame.len(),
+                max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
+                "dropped oversized manual run progress frame"
+            );
+            return;
+        }
+
+        match self.shared.state.try_lock() {
+            Ok(mut state) => {
+                if state.closed || state.terminal.is_some() {
+                    tracing::debug!(
+                        event = "agentd.manual_run_progress_dropped",
+                        "dropped manual run progress after terminal response was queued"
+                    );
+                    return;
+                }
+
+                if state.progress.len() >= PROGRESS_QUEUE_CAPACITY {
+                    tracing::debug!(
+                        event = "agentd.manual_run_progress_dropped",
+                        queue_capacity = PROGRESS_QUEUE_CAPACITY,
+                        "dropped manual run progress because the bounded queue is full"
+                    );
+                    return;
+                }
+
+                state.progress.push_back(QueuedProgressFrame {
+                    bytes: frame,
+                    deliver_before_terminal,
+                });
+                self.shared.available.notify_one();
+            }
+            Err(TryLockError::WouldBlock) => {
+                tracing::debug!(
+                    event = "agentd.manual_run_progress_dropped",
+                    "dropped manual run progress while the writer queue was busy"
+                );
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_queue_poisoned",
+                    "failed to lock manual run progress writer queue"
+                );
+            }
+        }
+    }
+
+    fn finish(&self, response: ResponseMessage) -> Result<(), io::Error> {
+        let terminal = serialize_response_frame(&response)?;
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.progress.retain(|frame| frame.deliver_before_terminal);
+        state.terminal = Some(terminal);
+        self.shared.available.notify_one();
+        Ok(())
+    }
+}
+
+fn run_progress_writer(mut stream: UnixStream, shared: Arc<ProgressWriterShared>) {
+    while let Some(frame) = next_progress_writer_frame(&shared) {
+        let is_terminal = matches!(frame, ProgressWriterFrame::Terminal(_));
+        let bytes = match frame {
+            ProgressWriterFrame::Progress(bytes) | ProgressWriterFrame::Terminal(bytes) => bytes,
+        };
+
+        match stream.write_all(&bytes) {
+            Ok(()) if is_terminal => return,
+            Ok(()) => {}
+            Err(error) if peer_disconnected_during_response(&error) => return,
+            Err(error) if progress_writer_timed_out(&error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_writer_timed_out",
+                    error = %error,
+                    timeout_ms = PROGRESS_WRITE_TIMEOUT.as_millis(),
+                    "manual run progress writer timed out and closed the client connection"
+                );
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_writer_failed",
+                    error = %error,
+                    "manual run progress writer closed the client connection after a write failure"
+                );
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return;
+            }
         }
     }
 }
 
-fn write_progress_frame_nonblocking(
-    stream: &mut UnixStream,
-    bytes: &[u8],
-) -> Result<(), io::Error> {
-    match stream.write(bytes) {
-        Ok(written) if written == bytes.len() => Ok(()),
-        Ok(0) => Err(io::Error::new(
-            io::ErrorKind::WriteZero,
-            "failed to write progress response",
-        )),
-        Ok(written) => Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            format!(
-                "partial progress frame write accepted {written} of {}",
-                bytes.len()
-            ),
-        )),
-        Err(error) if peer_disconnected_during_response(&error) => Ok(()),
-        Err(error) => Err(error),
+fn next_progress_writer_frame(shared: &ProgressWriterShared) -> Option<ProgressWriterFrame> {
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        if let Some(terminal) = state.terminal.take() {
+            if state
+                .progress
+                .front()
+                .is_some_and(|frame| frame.deliver_before_terminal)
+            {
+                let progress = state
+                    .progress
+                    .pop_front()
+                    .expect("front progress frame should exist");
+                state.terminal = Some(terminal);
+                return Some(ProgressWriterFrame::Progress(progress.bytes));
+            }
+            state.progress.clear();
+            state.closed = true;
+            return Some(ProgressWriterFrame::Terminal(terminal));
+        }
+
+        if let Some(progress) = state.progress.pop_front() {
+            return Some(ProgressWriterFrame::Progress(progress.bytes));
+        }
+
+        if state.closed {
+            return None;
+        }
+
+        state = shared
+            .available
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
     }
 }
 
-fn progress_frame_has_reserved_capacity(
-    stream: &UnixStream,
-    frame_bytes: usize,
-) -> Result<bool, io::Error> {
-    let send_buffer_bytes = socket_send_buffer_bytes(stream)?;
-    let queued_bytes = socket_queued_output_bytes(stream)?;
-    Ok(queued_bytes.saturating_add(frame_bytes)
-        <= send_buffer_bytes.saturating_sub(TERMINAL_RESPONSE_RESERVE_BYTES))
-}
-
-fn socket_send_buffer_bytes(stream: &UnixStream) -> Result<usize, io::Error> {
-    let mut size = 0_i32;
-    let mut size_len = std::mem::size_of::<i32>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_SNDBUF,
-            &mut size as *mut i32 as *mut libc::c_void,
-            &mut size_len,
-        )
-    };
-    if result == 0 {
-        usize::try_from(size)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "SO_SNDBUF was negative"))
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-fn socket_queued_output_bytes(stream: &UnixStream) -> Result<usize, io::Error> {
-    let mut queued = 0_i32;
-    let result = unsafe { libc::ioctl(stream.as_raw_fd(), libc::TIOCOUTQ, &mut queued) };
-    if result == 0 {
-        usize::try_from(queued)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "TIOCOUTQ was negative"))
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-fn progress_response_would_block(error: &io::Error) -> bool {
-    matches!(error.kind(), io::ErrorKind::WouldBlock)
+fn progress_writer_timed_out(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+    )
 }
 
 fn peer_disconnected_during_response(error: &io::Error) -> bool {
