@@ -5,14 +5,15 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use agentd_runner::{
-    RunnerError, SessionOutcome, StartupReconciliationReport, reconcile_startup_resources,
+    RunnerError, SessionOutcome, SessionProgressEvent, StartupReconciliationReport,
+    reconcile_startup_resources,
 };
 
 use crate::audit_root::prepare_audit_root;
@@ -515,9 +516,31 @@ fn render_progress<W: Write>(
                 if input_present { "present" } else { "absent" }
             )?;
         }
+        (ProgressMessage::TranscriptEvent { line, .. }, LiveObservationLevel::Summary) => {
+            writeln!(
+                writer,
+                "session event: {}",
+                summarize_transcript_event(&line)
+            )?;
+        }
+        (ProgressMessage::TranscriptEvent { session_id, line }, LiveObservationLevel::Full) => {
+            writeln!(writer, "session event: session_id={session_id} {line}")?;
+        }
     }
     writer.flush()?;
     Ok(())
+}
+
+fn summarize_transcript_event(line: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|event| {
+            event
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unparsed_event".to_string())
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
@@ -565,12 +588,36 @@ fn handle_connection_inner(
             work_unit,
             input,
         } => {
-            let progress = ResponseMessage::Progress {
+            let stream = Mutex::new(&mut stream);
+            let dispatch_progress = ResponseMessage::Progress {
                 progress: ProgressMessage::DispatchStarted {
                     agent: agent.clone(),
                     work_unit: work_unit.clone(),
                     input_present: input.is_some(),
                 },
+            };
+            let write_progress = |event: SessionProgressEvent| {
+                let SessionProgressEvent::TranscriptEvent { session_id, line } = event;
+                let progress = ResponseMessage::Progress {
+                    progress: ProgressMessage::TranscriptEvent { session_id, line },
+                };
+                match stream.lock() {
+                    Ok(mut stream) => {
+                        if let Err(error) = write_response(&mut stream, &progress) {
+                            tracing::warn!(
+                                event = "agentd.manual_run_progress_failed",
+                                error = %error,
+                                "failed to write manual run progress"
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            event = "agentd.manual_run_progress_lock_poisoned",
+                            "failed to lock manual run progress stream"
+                        );
+                    }
+                }
             };
             match dispatch_run_after_preflight(
                 config,
@@ -581,15 +628,24 @@ fn handle_connection_inner(
                     input,
                 },
                 executor,
-                || {
-                    if let Err(error) = write_response(&mut stream, &progress) {
+                || match stream.lock() {
+                    Ok(mut stream) => {
+                        if let Err(error) = write_response(&mut stream, &dispatch_progress) {
+                            tracing::warn!(
+                                event = "agentd.manual_run_progress_failed",
+                                error = %error,
+                                "failed to write manual run progress"
+                            );
+                        }
+                    }
+                    Err(_) => {
                         tracing::warn!(
-                            event = "agentd.manual_run_progress_failed",
-                            error = %error,
-                            "failed to write manual run progress"
+                            event = "agentd.manual_run_progress_lock_poisoned",
+                            "failed to lock manual run progress stream"
                         );
                     }
                 },
+                &write_progress,
             ) {
                 Ok(outcome) => {
                     log_manual_run_completed(&agent, work_unit.as_deref(), &outcome);
@@ -845,7 +901,8 @@ mod tests {
     use crate::config::Config;
     use crate::dispatch::SessionExecutor;
     use agentd_runner::{
-        RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+        RunnerError, SessionInvocation, SessionOutcome, SessionProgressObserver, SessionSpec,
+        StartupReconciliationReport,
     };
     use std::fs;
     use std::io;
@@ -888,6 +945,7 @@ mod tests {
             &self,
             _spec: SessionSpec,
             _invocation: SessionInvocation,
+            _progress: &dyn SessionProgressObserver,
         ) -> Result<SessionOutcome, RunnerError> {
             Ok(SessionOutcome::Success { exit_code: 0 })
         }

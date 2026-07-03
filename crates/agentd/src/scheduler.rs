@@ -107,7 +107,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use agentd_runner::{
-        RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+        RunnerError, SessionInvocation, SessionOutcome, SessionProgressObserver, SessionSpec,
+        StartupReconciliationReport,
     };
 
     use crate::SessionExecutor;
@@ -135,6 +136,7 @@ mod tests {
             &self,
             _spec: SessionSpec,
             invocation: SessionInvocation,
+            _progress: &dyn SessionProgressObserver,
         ) -> Result<SessionOutcome, RunnerError> {
             self.invocations
                 .lock()

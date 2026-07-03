@@ -72,8 +72,9 @@ In a second shell, trigger the canonical integration intent
 `wish` greets you and prompts for the statement. For this smoke test, enter
 ``add a `greet(name)` function`` at the intent prompt and leave the target
 prompt blank. The command streams live progress in that terminal while it waits
-for the session to finish, then reports the terminal outcome. `success` means
-the work completed; any other label is
+for the session to finish, printing concise transcript event names by default.
+Use `--progress full` to include raw transcript event detail. It then reports
+the terminal outcome. `success` means the work completed; any other label is
 interpreted per
 [commons EXIT-CODES.md](https://github.com/tesserine/commons/blob/main/EXIT-CODES.md).
 
