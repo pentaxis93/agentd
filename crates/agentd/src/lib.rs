@@ -13,7 +13,10 @@ mod protocol;
 pub mod runtime_paths;
 mod scheduler;
 
-pub use daemon::{ClientError, DaemonError, request_run, run_daemon_until_shutdown};
+pub use daemon::{
+    ClientError, DaemonError, LiveObservationLevel, request_run, request_run_with_live_observation,
+    run_daemon_until_shutdown,
+};
 pub use dispatch::{
     DispatchError, RunRequest, RunnerSessionExecutor, SessionExecutor, dispatch_run,
 };

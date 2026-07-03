@@ -7,11 +7,11 @@ use std::{io::BufRead, io::Write};
 
 use agentd::config::Config;
 use agentd::{
-    RunRequest, RunnerSessionExecutor, configure_tracing, request_run, resolve_client_socket_path,
-    run_daemon_until_shutdown,
+    LiveObservationLevel, RunRequest, RunnerSessionExecutor, configure_tracing,
+    request_run_with_live_observation, resolve_client_socket_path, run_daemon_until_shutdown,
 };
 use agentd_runner::InvocationInput;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
@@ -19,6 +19,33 @@ const WISH_GREETING: &str = "Speak a wish: the state you want made true.";
 const WISH_STATEMENT_PROMPT: &str = "What do you wish to be true?";
 const WISH_TARGET_PROMPT: &str = "What is this wish aimed at? Leave blank if it has no target.";
 const WISH_ABOUT: &str = "Elicit a wish and seed one governed session.";
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ProgressLevel {
+    /// Print concise live session lifecycle messages.
+    Summary,
+    /// Print live session lifecycle messages with all available fields.
+    Full,
+}
+
+impl From<ProgressLevel> for LiveObservationLevel {
+    fn from(level: ProgressLevel) -> Self {
+        match level {
+            ProgressLevel::Summary => Self::Summary,
+            ProgressLevel::Full => Self::Full,
+        }
+    }
+}
+
+struct RunClientArgs {
+    agent: String,
+    repo: Option<String>,
+    progress: ProgressLevel,
+    work_unit: Option<String>,
+    intent: Option<String>,
+    artifact_file: Option<PathBuf>,
+    artifact_type: Option<String>,
+}
 
 #[derive(Debug)]
 enum RunCommandError {
@@ -117,13 +144,15 @@ enum Command {
     /// Trigger a manual session through the running daemon.
     #[command(
         display_name = "agentd",
-        after_help = "Work-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
+        after_help = "Live observation:\n  agentd run streams concise session progress by default. Use --progress full for every available progress field.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
     )]
     Run {
         agent: String,
         repo: Option<String>,
         #[arg(long)]
         socket_path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = ProgressLevel::Summary)]
+        progress: ProgressLevel,
         #[arg(long, conflicts_with = "intent")]
         work_unit: Option<String>,
         #[arg(long, conflicts_with_all = ["work_unit", "artifact_file"])]
@@ -143,6 +172,8 @@ enum Command {
         repo: Option<String>,
         #[arg(long)]
         socket_path: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = ProgressLevel::Summary)]
+        progress: ProgressLevel,
     },
 }
 
@@ -162,7 +193,9 @@ fn main() -> ExitCode {
 }
 
 fn wish_after_help() -> String {
-    format!("Prompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}")
+    format!(
+        "Live observation:\n  agentd wish streams concise session progress by default. Use --progress full for every available progress field.\n\nPrompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}"
+    )
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -180,6 +213,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             agent,
             repo,
             socket_path,
+            progress,
             work_unit,
             intent,
             artifact_file,
@@ -193,18 +227,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             run_client(
                 socket_path.as_deref(),
-                agent,
-                repo,
-                work_unit,
-                intent,
-                artifact_file,
-                artifact_type,
+                RunClientArgs {
+                    agent,
+                    repo,
+                    progress,
+                    work_unit,
+                    intent,
+                    artifact_file,
+                    artifact_type,
+                },
             )
         }
         Some(Command::Wish {
             agent,
             repo,
             socket_path,
+            progress,
         }) => {
             if cli.config.is_some() {
                 return Err(Box::new(std::io::Error::new(
@@ -212,7 +250,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--config is only supported for daemon mode, not `agentd wish`",
                 )));
             }
-            run_wish_client(socket_path.as_deref(), agent, repo)
+            run_wish_client(socket_path.as_deref(), agent, repo, progress)
         }
     }
 }
@@ -251,21 +289,24 @@ fn register_termination_handlers(shutdown: Arc<AtomicBool>) -> Result<(), std::i
 
 fn run_client(
     explicit_socket_path: Option<&std::path::Path>,
-    agent: String,
-    repo: Option<String>,
-    work_unit: Option<String>,
-    intent: Option<String>,
-    artifact_file: Option<PathBuf>,
-    artifact_type: Option<String>,
+    args: RunClientArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let input = resolve_invocation_input(intent, artifact_file, artifact_type)?;
-    run_client_with_input(explicit_socket_path, agent, repo, work_unit, input)
+    let input = resolve_invocation_input(args.intent, args.artifact_file, args.artifact_type)?;
+    run_client_with_input(
+        explicit_socket_path,
+        args.agent,
+        args.repo,
+        args.progress,
+        args.work_unit,
+        input,
+    )
 }
 
 fn run_wish_client(
     explicit_socket_path: Option<&std::path::Path>,
     agent: String,
     repo: Option<String>,
+    progress: ProgressLevel,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout();
@@ -275,6 +316,7 @@ fn run_wish_client(
         explicit_socket_path,
         agent,
         repo,
+        progress,
         None,
         Some(InvocationInput::IntentText { statement, target }),
     )
@@ -284,11 +326,13 @@ fn run_client_with_input(
     explicit_socket_path: Option<&std::path::Path>,
     agent: String,
     repo: Option<String>,
+    progress: ProgressLevel,
     work_unit: Option<String>,
     input: Option<InvocationInput>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = resolve_client_socket_path(explicit_socket_path)?;
-    let outcome = request_run(
+    let mut stdout = std::io::stdout();
+    let outcome = request_run_with_live_observation(
         &socket_path,
         &RunRequest {
             agent,
@@ -296,6 +340,8 @@ fn run_client_with_input(
             work_unit,
             input,
         },
+        progress.into(),
+        &mut stdout,
     )?;
 
     if outcome.is_cli_success() {
