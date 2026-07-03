@@ -6,7 +6,7 @@ use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -524,7 +524,11 @@ fn render_progress<W: Write>(
             )?;
         }
         (ProgressMessage::TranscriptEvent { session_id, line }, LiveObservationLevel::Full) => {
-            writeln!(writer, "session event: session_id={session_id} {line}")?;
+            writeln!(
+                writer,
+                "session event: session_id={session_id} {}",
+                escape_control_chars(&line)
+            )?;
         }
     }
     writer.flush()?;
@@ -546,6 +550,18 @@ fn summarize_transcript_event(line: &str) -> String {
 
 fn escape_transcript_event_kind(kind: &str) -> String {
     kind.chars().flat_map(char::escape_default).collect()
+}
+
+fn escape_control_chars(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
@@ -606,9 +622,9 @@ fn handle_connection_inner(
                 let progress = ResponseMessage::Progress {
                     progress: ProgressMessage::TranscriptEvent { session_id, line },
                 };
-                match stream.lock() {
+                match stream.try_lock() {
                     Ok(mut stream) => {
-                        if let Err(error) = write_response(&mut stream, &progress) {
+                        if let Err(error) = try_write_progress_response(&mut stream, &progress) {
                             tracing::warn!(
                                 event = "agentd.manual_run_progress_failed",
                                 error = %error,
@@ -616,7 +632,13 @@ fn handle_connection_inner(
                             );
                         }
                     }
-                    Err(_) => {
+                    Err(TryLockError::WouldBlock) => {
+                        tracing::debug!(
+                            event = "agentd.manual_run_progress_dropped",
+                            "dropped manual run progress while another response was in flight"
+                        );
+                    }
+                    Err(TryLockError::Poisoned(_)) => {
                         tracing::warn!(
                             event = "agentd.manual_run_progress_lock_poisoned",
                             "failed to lock manual run progress stream"
@@ -633,9 +655,11 @@ fn handle_connection_inner(
                     input,
                 },
                 executor,
-                || match stream.lock() {
+                || match stream.try_lock() {
                     Ok(mut stream) => {
-                        if let Err(error) = write_response(&mut stream, &dispatch_progress) {
+                        if let Err(error) =
+                            try_write_progress_response(&mut stream, &dispatch_progress)
+                        {
                             tracing::warn!(
                                 event = "agentd.manual_run_progress_failed",
                                 error = %error,
@@ -643,7 +667,13 @@ fn handle_connection_inner(
                             );
                         }
                     }
-                    Err(_) => {
+                    Err(TryLockError::WouldBlock) => {
+                        tracing::debug!(
+                            event = "agentd.manual_run_progress_dropped",
+                            "dropped manual run progress while another response was in flight"
+                        );
+                    }
+                    Err(TryLockError::Poisoned(_)) => {
                         tracing::warn!(
                             event = "agentd.manual_run_progress_lock_poisoned",
                             "failed to lock manual run progress stream"
@@ -693,6 +723,64 @@ fn write_response_part(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), io::
         Err(error) if peer_disconnected_during_response(&error) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn try_write_progress_response(
+    stream: &mut UnixStream,
+    response: &ResponseMessage,
+) -> Result<(), io::Error> {
+    let mut payload = serde_json::to_vec(response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    payload.push(b'\n');
+
+    stream.set_nonblocking(true)?;
+    let write_result = write_response_nonblocking(stream, &payload);
+    let restore_result = stream.set_nonblocking(false);
+
+    match (write_result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) if peer_disconnected_during_response(&error) => Ok(()),
+        (Err(error), Ok(())) if progress_response_would_block(&error) => {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            Ok(())
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(write_error), Err(restore_error)) => {
+            tracing::warn!(
+                event = "agentd.manual_run_progress_blocking_restore_failed",
+                error = %restore_error,
+                "failed to restore blocking mode after manual run progress write"
+            );
+            Err(write_error)
+        }
+    }
+}
+
+fn write_response_nonblocking(stream: &mut UnixStream, mut bytes: &[u8]) -> Result<(), io::Error> {
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write progress response",
+                ));
+            }
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if peer_disconnected_during_response(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+
+    match stream.flush() {
+        Ok(()) => Ok(()),
+        Err(error) if peer_disconnected_during_response(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn progress_response_would_block(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::WouldBlock)
 }
 
 fn peer_disconnected_during_response(error: &io::Error) -> bool {
@@ -1093,6 +1181,31 @@ source = "AGENTD_GITHUB_TOKEN"
         assert!(
             !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
             "summary output should not contain embedded terminal controls: {output:?}"
+        );
+    }
+
+    #[test]
+    fn full_progress_escapes_untrusted_raw_transcript_line_controls() {
+        let mut output = Vec::new();
+
+        super::render_progress(
+            ProgressMessage::TranscriptEvent {
+                session_id: "fake-session-1".to_string(),
+                line: "{\"kind\":\"agent_input\"}\nspoof\u{1b}[2J".to_string(),
+            },
+            LiveObservationLevel::Full,
+            &mut output,
+        )
+        .expect("full progress should render");
+
+        let output = String::from_utf8(output).expect("full progress should be utf8");
+        assert_eq!(
+            output,
+            "session event: session_id=fake-session-1 {\"kind\":\"agent_input\"}\\nspoof\\u{1b}[2J\n"
+        );
+        assert!(
+            !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
+            "full output should not contain embedded terminal controls: {output:?}"
         );
     }
 
