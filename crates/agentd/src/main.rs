@@ -144,7 +144,7 @@ enum Command {
     /// Trigger a manual session through the running daemon.
     #[command(
         display_name = "agentd",
-        after_help = "Live observation:\n  agentd run streams concise session progress by default. Use --progress full for every available progress field.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
+        after_help = "Live observation:\n  agentd run streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
     )]
     Run {
         agent: String,
@@ -194,7 +194,7 @@ fn main() -> ExitCode {
 
 fn wish_after_help() -> String {
     format!(
-        "Live observation:\n  agentd wish streams concise session progress by default. Use --progress full for every available progress field.\n\nPrompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}"
+        "Live observation:\n  agentd wish streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nPrompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}"
     )
 }
 
