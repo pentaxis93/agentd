@@ -312,6 +312,12 @@ agentd run site-builder --work-unit issue-42 --artifact-type work-unit --artifac
 The file stem becomes the artifact id, so the file stem must match
 `--work-unit`.
 
+`agentd wish` and `agentd run` stream live session progress to the invoking
+terminal while the daemon runs the session. The default `--progress summary`
+prints concise lifecycle output before the terminal `session <status>` line;
+`--progress full` includes every field currently carried by the progress
+stream.
+
 `agentd run` does not read `agentd.toml`. The client connects to the daemon by
 either:
 
