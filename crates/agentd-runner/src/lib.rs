@@ -337,10 +337,10 @@ fn observe_transcript_events(
         }
     };
 
-    let mut line = String::new();
+    let mut pending_line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
+        let mut chunk = String::new();
+        match reader.read_line(&mut chunk) {
             Ok(0) => {
                 if stop.load(Ordering::Acquire) {
                     return;
@@ -348,8 +348,14 @@ fn observe_transcript_events(
                 thread::sleep(TRANSCRIPT_POLL_INTERVAL);
             }
             Ok(_) => {
-                let line = line.trim_end_matches(['\r', '\n']).to_string();
-                if !line.trim().is_empty() {
+                let line_complete = chunk.ends_with('\n');
+                pending_line.push_str(&chunk);
+                if line_complete {
+                    let line = pending_line.trim_end_matches(['\r', '\n']).to_string();
+                    pending_line.clear();
+                    if line.trim().is_empty() {
+                        continue;
+                    }
                     progress.observe(SessionProgressEvent::TranscriptEvent {
                         session_id: session_id.to_string(),
                         line,
@@ -503,9 +509,11 @@ mod tests {
     const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
 
     #[test]
-    fn transcript_observer_reports_events_written_while_session_is_running() {
+    fn transcript_observer_waits_for_newline_before_reporting_live_event() {
         let transcript_dir = unique_temp_dir("agentd-live-transcript-observer");
         fs::create_dir_all(&transcript_dir).expect("transcript dir should be created");
+        let events_path = transcript_dir.join(TRANSCRIPT_EVENTS_FILE);
+        fs::write(&events_path, "").expect("transcript events should be created");
         let stop = AtomicBool::new(false);
         let (tx, rx) = mpsc::channel();
         thread::scope(|scope| {
@@ -523,18 +531,30 @@ mod tests {
                 );
             });
 
-            let events_path = transcript_dir.join(TRANSCRIPT_EVENTS_FILE);
-            fs::write(
-                &events_path,
-                r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working"}"#,
-            )
-            .expect("transcript event should be written");
-            fs::OpenOptions::new()
+            let mut events = fs::OpenOptions::new()
                 .append(true)
                 .open(&events_path)
-                .expect("transcript events should reopen")
+                .expect("transcript events should reopen");
+            events
+                .write_all(
+                    br#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working"}"#,
+                )
+                .expect("partial transcript event should be written");
+            events
+                .flush()
+                .expect("partial transcript event should flush");
+
+            assert!(
+                rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "observer must not report a transcript event before its newline is written"
+            );
+
+            events
                 .write_all(b"\n")
                 .expect("transcript event newline should be written");
+            events
+                .flush()
+                .expect("complete transcript event should flush");
 
             assert_eq!(
                 rx.recv_timeout(Duration::from_secs(2))
