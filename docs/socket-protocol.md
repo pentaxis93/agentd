@@ -59,11 +59,13 @@ target prompt; `agentd run --intent` has no target flag.
 
 `{"type": "pong"}` — answer to `ping`.
 
-`{"type": "progress", "progress": {"stage": "dispatch_started", ...}}` —
-non-terminal live progress for a run request. `agentd wish` and `agentd run`
-render these frames in the invoking terminal while they wait for the terminal
-outcome; `--progress summary` is the default and `--progress full` includes
-all fields carried by the frame.
+`{"type": "progress", "progress": {"stage": "...", ...}}` — non-terminal
+live progress for a run request. `dispatch_started` is a start marker;
+`transcript_event` carries execution-phase events from the running session's
+`agentd/transcript/events.jsonl` stream. `agentd wish` and `agentd run` render
+these frames in the invoking terminal while they wait for the terminal outcome;
+`--progress summary` prints concise event names and `--progress full` includes
+the raw transcript event line.
 
 `{"type": "error", "message": "..."}` — the request was rejected before a
 session outcome existed (malformed request, unknown agent, dispatch
@@ -81,6 +83,13 @@ operator connection and is dispatching it into session execution:
 
 ```json
 {"type":"progress","progress":{"stage":"dispatch_started","agent":"site-builder","work_unit":"issue-42","input_present":false}}
+```
+
+`transcript_event` means the running session appended a structured transcript
+event that the daemon forwarded before the terminal outcome:
+
+```json
+{"type":"progress","progress":{"stage":"transcript_event","session_id":"7f5a1c2d9e0b3a44","line":"{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"...\"}"}}
 ```
 
 ## Outcome statuses

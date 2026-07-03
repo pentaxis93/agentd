@@ -1,8 +1,8 @@
 //! Daemon Unix-socket wire messages.
 //!
 //! Wire format and connection lifecycle are specified in
-//! `docs/socket-protocol.md`: newline-delimited JSON, one request and one
-//! response per connection. The protocol is intentionally internal and
+//! `docs/socket-protocol.md`: newline-delimited JSON, one request followed by
+//! one or more response lines. The protocol is intentionally internal and
 //! unversioned in `v0.1.x` — daemon and CLI client must be the same build
 //! (see README § Running a Session), which is why these types are
 //! `pub(crate)` and carry no version field.
@@ -57,6 +57,8 @@ pub(crate) enum ProgressMessage {
         work_unit: Option<String>,
         input_present: bool,
     },
+    /// One event line emitted by the running session's transcript stream.
+    TranscriptEvent { session_id: String, line: String },
 }
 
 /// Terminal session outcome.
