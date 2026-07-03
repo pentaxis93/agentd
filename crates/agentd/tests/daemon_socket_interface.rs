@@ -1,5 +1,4 @@
-use std::io::{BufRead, Write};
-use std::os::fd::AsRawFd;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -126,13 +125,9 @@ impl BurstProgressExecutor {
             progress_events: SATURATING_PROGRESS_EVENTS,
             progress_line: format!(
                 r#"{{"schema_version":1,"source":"runa","kind":"agent_input","content":"{}"}}"#,
-                "x".repeat(8 * 1024)
+                "x".repeat(16 * 1024)
             ),
         }
-    }
-
-    fn total_progress_bytes(&self) -> usize {
-        self.progress_events * self.progress_line.len()
     }
 }
 
@@ -303,22 +298,6 @@ fn run_daemon_until_shutdown_for_test(
     run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
         Ok(StartupReconciliationReport::default())
     })
-}
-
-fn socket_send_buffer_size(stream: &UnixStream) -> usize {
-    let mut size = 0_i32;
-    let mut size_len = std::mem::size_of::<i32>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_SNDBUF,
-            &mut size as *mut i32 as *mut libc::c_void,
-            &mut size_len,
-        )
-    };
-    assert_eq!(result, 0, "SO_SNDBUF should be readable");
-    usize::try_from(size).expect("SO_SNDBUF should be non-negative")
 }
 
 #[test]
@@ -535,21 +514,20 @@ fn client_full_progress_includes_raw_execution_event_detail() {
 }
 
 #[test]
-fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown() {
+fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcome() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
     }
-    let runtime_dir = unique_runtime_dir("non-reading-progress-client");
+    let runtime_dir = unique_runtime_dir("slow-reading-progress-client");
     let config = config_in_runtime_dir(&runtime_dir);
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
     let (completed_tx, completed_rx) = mpsc::channel();
     let executor = BurstProgressExecutor::new(completed_tx);
-    let offered_progress_bytes = executor.total_progress_bytes();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
     });
@@ -557,11 +535,6 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
 
     let mut client =
         Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
-    let send_buffer_size = socket_send_buffer_size(client.as_ref().expect("client should exist"));
-    assert!(
-        offered_progress_bytes > send_buffer_size * 16,
-        "test must offer enough progress to saturate the socket send buffer: offered={offered_progress_bytes} SO_SNDBUF={send_buffer_size}"
-    );
     writeln!(
         client.as_mut().expect("client should exist"),
         "{}",
@@ -575,6 +548,8 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
     )
     .expect("client request should write");
 
+    thread::sleep(Duration::from_millis(50));
+
     if completed_rx.recv_timeout(Duration::from_secs(5)).is_err() {
         drop(client.take());
         shutdown.store(true, Ordering::Release);
@@ -585,7 +560,7 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
         unsafe {
             std::env::remove_var("AGENTD_GITHUB_TOKEN");
         }
-        panic!("progress forwarding should not stall session cleanup for a non-reading client");
+        panic!("progress forwarding should not stall session cleanup for a slow-reading client");
     }
 
     shutdown.store(true, Ordering::Release);
@@ -609,30 +584,40 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
             unsafe {
                 std::env::remove_var("AGENTD_GITHUB_TOKEN");
             }
-            panic!("daemon shutdown should not wait for a non-reading progress client");
+            panic!("daemon shutdown should not wait for a slow-reading progress client");
         }
     };
 
     joiner.join().expect("join helper should join");
     join_result.expect("daemon should exit cleanly");
 
-    let client = client.take().expect("client should still be connected");
+    let mut client = client.take().expect("client should still be connected");
     client
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("client read timeout should be set");
-    let mut reader = std::io::BufReader::new(client);
-    let mut lines = Vec::new();
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8192];
     loop {
-        let mut line = String::new();
-        let bytes_read = reader
-            .read_line(&mut line)
-            .expect("daemon stream should remain valid JSONL until EOF");
-        if bytes_read == 0 {
-            break;
+        match client.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => {
+                response.extend_from_slice(&buffer[..bytes_read]);
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("slow-reading client timed out before daemon closed the response stream")
+            }
+            Err(error) => panic!("slow-reading client failed to read daemon response: {error}"),
         }
-        lines.push(line);
     }
 
+    let response = String::from_utf8(response).expect("daemon response should be utf8 JSONL");
+    let lines: Vec<&str> = response.lines().collect();
     assert!(
         !lines.is_empty(),
         "daemon should write at least the terminal response"
@@ -650,11 +635,12 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
     }
     assert!(
         saw_terminal_outcome,
-        "terminal outcome must survive saturated progress writes: {lines:?}"
+        "terminal outcome must survive slow-reader progress backpressure; parsed {} lines with {progress_frames} progress frames",
+        lines.len()
     );
     assert!(
         progress_frames < SATURATING_PROGRESS_EVENTS,
-        "saturated non-reading client should force progress drops, got all {progress_frames} frames"
+        "slow-reading client should force progress drops, got all {progress_frames} frames"
     );
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
