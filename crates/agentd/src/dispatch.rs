@@ -110,6 +110,17 @@ pub fn dispatch_run(
     request: &RunRequest,
     executor: &impl SessionExecutor,
 ) -> Result<SessionOutcome, DispatchError> {
+    dispatch_run_after_preflight(config, request, executor, || {})
+}
+
+/// Resolve a named agent plus run request into a runner session, notify once
+/// preflight has passed, and run it.
+pub fn dispatch_run_after_preflight(
+    config: &Config,
+    request: &RunRequest,
+    executor: &impl SessionExecutor,
+    after_preflight: impl FnOnce(),
+) -> Result<SessionOutcome, DispatchError> {
     let agent = config
         .agent(&request.agent)
         .ok_or_else(|| DispatchError::UnknownAgent {
@@ -148,6 +159,8 @@ pub fn dispatch_run(
         .repo_token_source()
         .and_then(|source| std::env::var(source).ok())
         .filter(|value| !value.is_empty());
+
+    after_preflight();
 
     executor
         .run_session(

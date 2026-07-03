@@ -316,6 +316,12 @@ The file stem becomes the artifact id, so the file stem must match
 it materializes a target-bearing `intent` seed and launches unscoped `runa run`
 so runa resolves the reference fail-closed before scoped work begins.
 
+`agentd wish` and `agentd run` stream live session progress to the invoking
+terminal while the daemon runs the session. The default `--progress summary`
+prints concise lifecycle output before the terminal `session <status>` line;
+`--progress full` includes every field currently carried by the progress
+stream.
+
 `agentd run` does not read `agentd.toml`. The client connects to the daemon by
 either:
 
