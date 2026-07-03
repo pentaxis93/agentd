@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the existing canonical intent intake.
 - `agentd wish` and `agentd run` now stream live session progress in the
   invoking terminal, with `--progress summary` as the default and
-  `--progress full` for all fields currently carried by progress frames.
+  `--progress full` for raw transcript event detail while the session executes.
 
 ### Changed
 

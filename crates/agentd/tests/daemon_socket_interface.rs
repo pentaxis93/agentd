@@ -14,7 +14,8 @@ use agentd::{
 };
 use agentd_runner::InvocationInput;
 use agentd_runner::{
-    RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    RunnerError, SessionInvocation, SessionOutcome, SessionProgressEvent, SessionProgressObserver,
+    SessionSpec, StartupReconciliationReport,
 };
 use serde_json::json;
 
@@ -51,6 +52,7 @@ impl SessionExecutor for FixedOutcomeExecutor {
         &self,
         _spec: SessionSpec,
         _invocation: SessionInvocation,
+        _progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         Ok(self.outcome.clone())
     }
@@ -80,6 +82,7 @@ impl SessionExecutor for RecordingInvocationExecutor {
         &self,
         _spec: SessionSpec,
         invocation: SessionInvocation,
+        _progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         self.invocations
             .lock()
@@ -94,6 +97,7 @@ struct BlockingFirstRunExecutor {
     state: Arc<BlockingFirstRunState>,
     first_outcome: SessionOutcome,
     later_outcome: SessionOutcome,
+    first_progress_line: Option<String>,
 }
 
 struct BlockingFirstRunState {
@@ -112,7 +116,13 @@ impl BlockingFirstRunExecutor {
             }),
             first_outcome,
             later_outcome,
+            first_progress_line: None,
         }
+    }
+
+    fn with_first_progress_line(mut self, line: &str) -> Self {
+        self.first_progress_line = Some(line.to_string());
+        self
     }
 
     fn wait_for_first_run_to_start(&self) {
@@ -138,6 +148,7 @@ impl SessionExecutor for BlockingFirstRunExecutor {
         &self,
         _spec: SessionSpec,
         _invocation: SessionInvocation,
+        progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         let call_index = self.state.calls.fetch_add(1, Ordering::AcqRel);
         if call_index == 0 {
@@ -148,6 +159,13 @@ impl SessionExecutor for BlockingFirstRunExecutor {
             *started = true;
             started_cvar.notify_all();
             drop(started);
+
+            if let Some(line) = &self.first_progress_line {
+                progress.observe(SessionProgressEvent::TranscriptEvent {
+                    session_id: "fake-session-1".to_string(),
+                    line: line.clone(),
+                });
+            }
 
             let (released_lock, released_cvar) = &self.state.first_released;
             let released = released_lock
@@ -282,7 +300,7 @@ fn daemon_reports_run_outcome_back_through_client_request() {
 }
 
 #[test]
-fn client_receives_live_progress_before_session_outcome() {
+fn client_receives_execution_progress_while_session_is_still_running() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -297,6 +315,9 @@ fn client_receives_live_progress_before_session_outcome() {
     let executor = BlockingFirstRunExecutor::new(
         SessionOutcome::Success { exit_code: 0 },
         SessionOutcome::Success { exit_code: 0 },
+    )
+    .with_first_progress_line(
+        r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
@@ -321,27 +342,111 @@ fn client_receives_live_progress_before_session_outcome() {
         )
     });
 
+    executor.wait_for_first_run_to_start();
     let mut progress = String::new();
     let deadline = Instant::now() + Duration::from_secs(1);
-    while !progress.ends_with('\n') {
+    while !progress.contains("session event: agent_input") {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
             !remaining.is_zero(),
-            "live progress should reach the client before the session completes"
+            "execution progress should reach the client before the session completes"
         );
         progress.push_str(
             &progress_rx
                 .recv_timeout(remaining)
-                .expect("live progress should reach the client before the session completes"),
+                .expect("execution progress should reach the client before the session completes"),
         );
     }
     assert!(
-        progress.contains("session running: site-builder (issue-122)"),
+        progress.contains("session event: agent_input"),
         "unexpected progress output: {progress}"
     );
     assert!(
         !client_request.is_finished(),
         "client should still be waiting for the terminal outcome after progress arrives"
+    );
+
+    executor.release_first_run();
+    assert_eq!(
+        client_request
+            .join()
+            .expect("client request thread should join")
+            .expect("client request should succeed"),
+        SessionOutcome::Success { exit_code: 0 }
+    );
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
+fn client_full_progress_includes_raw_execution_event_detail() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("full-live-progress");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let executor = BlockingFirstRunExecutor::new(
+        SessionOutcome::Success { exit_code: 0 },
+        SessionOutcome::Success { exit_code: 0 },
+    )
+    .with_first_progress_line(
+        r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
+    );
+    let daemon_executor = executor.clone();
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let client_config = config.clone();
+    let client_request = thread::spawn(move || {
+        let mut writer = ChannelWriter { tx: progress_tx };
+        request_run_with_live_observation(
+            client_config.daemon(),
+            &RunRequest {
+                agent: "site-builder".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
+                work_unit: Some("issue-122".to_string()),
+                input: None,
+            },
+            LiveObservationLevel::Full,
+            &mut writer,
+        )
+    });
+
+    executor.wait_for_first_run_to_start();
+    let mut progress = String::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !progress.contains(r#""content":"working step""#) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "full execution progress should reach the client before the session completes"
+        );
+        progress.push_str(
+            &progress_rx
+                .recv_timeout(remaining)
+                .expect("full execution progress should reach the client before completion"),
+        );
+    }
+    assert!(progress.contains("session_id=fake-session-1"), "{progress}");
+    assert!(
+        !client_request.is_finished(),
+        "client should still be waiting for the terminal outcome after full progress arrives"
     );
 
     executor.release_first_run();

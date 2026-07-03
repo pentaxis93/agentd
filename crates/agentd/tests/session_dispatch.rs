@@ -7,7 +7,7 @@ use agentd::config::{Config, ConfigError};
 use agentd::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
 use agentd_runner::{
     InvocationInput, ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome,
-    SessionSpec,
+    SessionProgressObserver, SessionSpec,
 };
 use serde_json::json;
 
@@ -59,6 +59,7 @@ impl SessionExecutor for RecordingExecutor {
         &self,
         spec: SessionSpec,
         invocation: SessionInvocation,
+        _progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         let mut state = self.state.lock().expect("recording state should lock");
         state.last_spec = Some(spec);

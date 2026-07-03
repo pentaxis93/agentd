@@ -12,8 +12,8 @@ use agentd::SessionExecutor;
 use agentd::config::Config;
 use agentd::daemon::run_daemon_until_shutdown_with_reconciler;
 use agentd_runner::{
-    InvocationInput, RunnerError, SessionInvocation, SessionOutcome, SessionSpec,
-    StartupReconciliationReport,
+    InvocationInput, RunnerError, SessionInvocation, SessionOutcome, SessionProgressObserver,
+    SessionSpec, StartupReconciliationReport,
 };
 use serde_json::json;
 
@@ -35,6 +35,7 @@ impl SessionExecutor for FixedOutcomeExecutor {
         &self,
         _spec: SessionSpec,
         _invocation: SessionInvocation,
+        _progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         Ok(self.outcome.clone())
     }
@@ -64,6 +65,7 @@ impl SessionExecutor for RecordingInvocationExecutor {
         &self,
         _spec: SessionSpec,
         invocation: SessionInvocation,
+        _progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         self.invocations
             .lock()

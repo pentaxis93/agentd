@@ -30,8 +30,9 @@ pub(crate) mod test_support;
 pub use reconcile::reconcile_startup_resources;
 pub use types::{
     AgentNameValidationError, BindMount, EnvironmentNameValidationError, InvocationInput,
-    MountOverlapError, MountTargetValidationError, ResolvedEnvironmentVariable, RunnerError,
-    SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    MountOverlapError, MountTargetValidationError, NoopSessionProgressObserver,
+    ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome,
+    SessionProgressEvent, SessionProgressObserver, SessionSpec, StartupReconciliationReport,
 };
 pub use validation::{
     validate_agent_name, validate_environment_name, validate_mount_overlap, validate_mount_target,
@@ -50,10 +51,21 @@ use lifecycle::{
 };
 use naming::format_container_name;
 use resources::{
-    ResourceAllocationFailure, SessionResources, cleanup_methodology_staging_dir,
+    ResourceAllocationFailure, SecretBinding, SessionResources, cleanup_methodology_staging_dir,
     cleanup_podman_secrets, prepare_session_resources, unique_suffix,
 };
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 use validation::{validate_invocation, validate_spec};
+
+const TRANSCRIPT_EVENTS_FILE: &str = "events.jsonl";
+const TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Executes a single session from validation through teardown.
 ///
@@ -70,6 +82,16 @@ use validation::{validate_invocation, validate_spec};
 pub fn run_session(
     spec: SessionSpec,
     invocation: SessionInvocation,
+) -> Result<SessionOutcome, RunnerError> {
+    run_session_with_progress(spec, invocation, &NoopSessionProgressObserver)
+}
+
+/// Executes a single session and reports best-effort transcript progress while
+/// the session process is running.
+pub fn run_session_with_progress(
+    spec: SessionSpec,
+    invocation: SessionInvocation,
+    progress: &dyn SessionProgressObserver,
 ) -> Result<SessionOutcome, RunnerError> {
     validate_spec(&spec)?;
     validate_invocation(&invocation)?;
@@ -192,17 +214,13 @@ pub fn run_session(
     }
 
     let secret_bindings = resources.all_secret_bindings();
-    let start_result = match invocation.timeout {
-        Some(timeout) => run_container_with_timeout(
-            &resources.container_name,
-            &session_id,
-            &secret_bindings,
-            timeout,
-        ),
-        None => {
-            run_container_to_completion(&resources.container_name, &session_id, &secret_bindings)
-        }
-    };
+    let start_result = run_container_with_transcript_progress(
+        &resources,
+        &session_id,
+        &secret_bindings,
+        invocation.timeout,
+        progress,
+    );
 
     match &start_result {
         Ok(outcome) => log_session_outcome(&session_id, &resources.container_name, outcome),
@@ -251,6 +269,142 @@ pub fn run_session(
     }
 }
 
+fn run_container_with_transcript_progress(
+    resources: &SessionResources,
+    session_id: &str,
+    secret_bindings: &[SecretBinding],
+    timeout: Option<Duration>,
+    progress: &dyn SessionProgressObserver,
+) -> Result<SessionOutcome, RunnerError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    thread::scope(|scope| {
+        let observer_stop = Arc::clone(&stop);
+        let observer = scope.spawn(move || {
+            observe_transcript_events(
+                &resources.audit_record.transcript_dir,
+                session_id,
+                progress,
+                &observer_stop,
+            );
+        });
+
+        let result = match timeout {
+            Some(timeout) => run_container_with_timeout(
+                &resources.container_name,
+                session_id,
+                secret_bindings,
+                timeout,
+            ),
+            None => {
+                run_container_to_completion(&resources.container_name, session_id, secret_bindings)
+            }
+        };
+        stop.store(true, Ordering::Release);
+        if observer.join().is_err() {
+            tracing::warn!(
+                event = "runner.transcript_progress_observer_panicked",
+                session_id = session_id,
+                container_name = %resources.container_name,
+                "transcript progress observer panicked"
+            );
+        }
+        result
+    })
+}
+
+fn observe_transcript_events(
+    transcript_dir: &Path,
+    session_id: &str,
+    progress: &dyn SessionProgressObserver,
+    stop: &AtomicBool,
+) {
+    let events_path = transcript_dir.join(TRANSCRIPT_EVENTS_FILE);
+    let mut reader = loop {
+        match open_live_transcript_events(&events_path) {
+            Ok(file) => break BufReader::new(file),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(TRANSCRIPT_POLL_INTERVAL);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "runner.transcript_progress_unavailable",
+                    session_id = session_id,
+                    path = %events_path.display(),
+                    error = %error,
+                    "live transcript progress unavailable"
+                );
+                return;
+            }
+        }
+    };
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(TRANSCRIPT_POLL_INTERVAL);
+            }
+            Ok(_) => {
+                let line = line.trim_end_matches(['\r', '\n']).to_string();
+                if !line.trim().is_empty() {
+                    progress.observe(SessionProgressEvent::TranscriptEvent {
+                        session_id: session_id.to_string(),
+                        line,
+                    });
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event = "runner.transcript_progress_read_failed",
+                    session_id = session_id,
+                    path = %events_path.display(),
+                    error = %error,
+                    "failed to read live transcript progress"
+                );
+                return;
+            }
+        }
+    }
+}
+
+fn open_live_transcript_events(path: &Path) -> Result<File, io::Error> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::other(format!(
+            "unsafe transcript artifact: {TRANSCRIPT_EVENTS_FILE} is not a regular file"
+        )));
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) => io::Error::other(format!(
+                "unsafe transcript artifact: {TRANSCRIPT_EVENTS_FILE} is not a regular file"
+            )),
+            _ => error,
+        })?;
+    let open_metadata = file.metadata()?;
+    if !open_metadata.is_file()
+        || open_metadata.dev() != metadata.dev()
+        || open_metadata.ino() != metadata.ino()
+    {
+        return Err(io::Error::other(format!(
+            "unsafe transcript artifact: {TRANSCRIPT_EVENTS_FILE} is not a regular file"
+        )));
+    }
+
+    Ok(file)
+}
+
 fn cleanup_session_resources(resources: &SessionResources) -> Result<(), RunnerError> {
     let container_result = container::cleanup_container(&resources.container_name);
     let secret_bindings = resources.all_secret_bindings();
@@ -296,8 +450,11 @@ mod tests {
     };
     use serde_json::Value;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -348,6 +505,55 @@ mod tests {
     }
 
     const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
+
+    #[test]
+    fn transcript_observer_reports_events_written_while_session_is_running() {
+        let transcript_dir = unique_temp_dir("agentd-live-transcript-observer");
+        fs::create_dir_all(&transcript_dir).expect("transcript dir should be created");
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let observer = |event| {
+                tx.send(event).expect("progress event should send");
+            };
+            let observer_transcript_dir = &transcript_dir;
+            let observer_stop = &stop;
+            let handle = scope.spawn(move || {
+                observe_transcript_events(
+                    observer_transcript_dir,
+                    "session-123",
+                    &observer,
+                    observer_stop,
+                );
+            });
+
+            let events_path = transcript_dir.join(TRANSCRIPT_EVENTS_FILE);
+            fs::write(
+                &events_path,
+                r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working"}"#,
+            )
+            .expect("transcript event should be written");
+            fs::OpenOptions::new()
+                .append(true)
+                .open(&events_path)
+                .expect("transcript events should reopen")
+                .write_all(b"\n")
+                .expect("transcript event newline should be written");
+
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(2))
+                    .expect("observer should report a live transcript event"),
+                SessionProgressEvent::TranscriptEvent {
+                    session_id: "session-123".to_string(),
+                    line: r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working"}"#.to_string(),
+                }
+            );
+
+            stop.store(true, Ordering::Release);
+            handle.join().expect("observer should not panic");
+        });
+        fs::remove_dir_all(transcript_dir).expect("transcript dir should be removed");
+    }
 
     fn reconcile_startup_resources_for_tests() -> Result<StartupReconciliationReport, RunnerError> {
         reconcile_startup_resources(TEST_DAEMON_INSTANCE_ID)
