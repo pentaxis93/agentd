@@ -1,12 +1,14 @@
+use std::io::{BufRead, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::{io::Write, sync::mpsc::Sender};
 
 use agentd::config::{Config, ConfigError};
 use agentd::daemon::run_daemon_until_shutdown_with_reconciler;
@@ -115,16 +117,22 @@ struct BurstProgressExecutor {
     progress_line: String,
 }
 
+const SATURATING_PROGRESS_EVENTS: usize = 4096;
+
 impl BurstProgressExecutor {
     fn new(completed: Sender<()>) -> Self {
         Self {
             completed,
-            progress_events: 32,
+            progress_events: SATURATING_PROGRESS_EVENTS,
             progress_line: format!(
                 r#"{{"schema_version":1,"source":"runa","kind":"agent_input","content":"{}"}}"#,
-                "x".repeat(256 * 1024)
+                "x".repeat(8 * 1024)
             ),
         }
+    }
+
+    fn total_progress_bytes(&self) -> usize {
+        self.progress_events * self.progress_line.len()
     }
 }
 
@@ -295,6 +303,22 @@ fn run_daemon_until_shutdown_for_test(
     run_daemon_until_shutdown_with_reconciler(config, executor, shutdown, || {
         Ok(StartupReconciliationReport::default())
     })
+}
+
+fn socket_send_buffer_size(stream: &UnixStream) -> usize {
+    let mut size = 0_i32;
+    let mut size_len = std::mem::size_of::<i32>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &mut size as *mut i32 as *mut libc::c_void,
+            &mut size_len,
+        )
+    };
+    assert_eq!(result, 0, "SO_SNDBUF should be readable");
+    usize::try_from(size).expect("SO_SNDBUF should be non-negative")
 }
 
 #[test]
@@ -525,6 +549,7 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
     let daemon_shutdown = shutdown.clone();
     let (completed_tx, completed_rx) = mpsc::channel();
     let executor = BurstProgressExecutor::new(completed_tx);
+    let offered_progress_bytes = executor.total_progress_bytes();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
     });
@@ -532,6 +557,11 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
 
     let mut client =
         Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
+    let send_buffer_size = socket_send_buffer_size(client.as_ref().expect("client should exist"));
+    assert!(
+        offered_progress_bytes > send_buffer_size * 16,
+        "test must offer enough progress to saturate the socket send buffer: offered={offered_progress_bytes} SO_SNDBUF={send_buffer_size}"
+    );
     writeln!(
         client.as_mut().expect("client should exist"),
         "{}",
@@ -545,7 +575,7 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
     )
     .expect("client request should write");
 
-    if completed_rx.recv_timeout(Duration::from_secs(1)).is_err() {
+    if completed_rx.recv_timeout(Duration::from_secs(5)).is_err() {
         drop(client.take());
         shutdown.store(true, Ordering::Release);
         handle
@@ -583,9 +613,49 @@ fn non_reading_progress_client_does_not_stall_session_cleanup_or_daemon_shutdown
         }
     };
 
-    drop(client.take());
     joiner.join().expect("join helper should join");
     join_result.expect("daemon should exit cleanly");
+
+    let client = client.take().expect("client should still be connected");
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("client read timeout should be set");
+    let mut reader = std::io::BufReader::new(client);
+    let mut lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader
+            .read_line(&mut line)
+            .expect("daemon stream should remain valid JSONL until EOF");
+        if bytes_read == 0 {
+            break;
+        }
+        lines.push(line);
+    }
+
+    assert!(
+        !lines.is_empty(),
+        "daemon should write at least the terminal response"
+    );
+    let mut progress_frames = 0_usize;
+    let mut saw_terminal_outcome = false;
+    for line in &lines {
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("daemon must not emit partial JSON frames");
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("progress") => progress_frames += 1,
+            Some("session_outcome") => saw_terminal_outcome = true,
+            other => panic!("unexpected response type after saturated progress writes: {other:?}"),
+        }
+    }
+    assert!(
+        saw_terminal_outcome,
+        "terminal outcome must survive saturated progress writes: {lines:?}"
+    );
+    assert!(
+        progress_frames < SATURATING_PROGRESS_EVENTS,
+        "saturated non-reading client should force progress drops, got all {progress_frames} frames"
+    );
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
     }
