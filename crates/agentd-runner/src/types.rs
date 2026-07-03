@@ -135,6 +135,35 @@ pub struct SessionInvocation {
     pub timeout: Option<Duration>,
 }
 
+/// Non-terminal progress observed while a session is executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionProgressEvent {
+    /// One complete line from `agentd/transcript/events.jsonl`.
+    TranscriptEvent { session_id: String, line: String },
+}
+
+/// Receives best-effort execution progress while a session is running.
+pub trait SessionProgressObserver: Send + Sync {
+    fn observe(&self, event: SessionProgressEvent);
+}
+
+impl<F> SessionProgressObserver for F
+where
+    F: Fn(SessionProgressEvent) + Send + Sync,
+{
+    fn observe(&self, event: SessionProgressEvent) {
+        self(event);
+    }
+}
+
+/// Progress observer used by callers that only need the terminal outcome.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopSessionProgressObserver;
+
+impl SessionProgressObserver for NoopSessionProgressObserver {
+    fn observe(&self, _event: SessionProgressEvent) {}
+}
+
 /// Terminal outcome of a completed session.
 ///
 /// Labels and exit-code semantics implement the shared session-outcome

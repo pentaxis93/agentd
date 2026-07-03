@@ -143,7 +143,7 @@ enum Command {
     /// Trigger a manual session through the running daemon.
     #[command(
         display_name = "agentd",
-        after_help = "Live observation:\n  agentd run streams concise session progress by default. Use --progress full for every available progress field.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
+        after_help = "Live observation:\n  agentd run streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
     )]
     Run {
         agent: String,
@@ -164,7 +164,7 @@ enum Command {
     /// Greet the operator, elicit intent, and seed a session.
     #[command(
         display_name = "agentd",
-        after_help = "Live observation:\n  agentd wish streams concise session progress by default. Use --progress full for every available progress field.\n\nPrompts:\n  Speak your wish.\n  What do you wish the agent to do?\n  What is this wish aimed at? Leave blank for prose only."
+        after_help = "Live observation:\n  agentd wish streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nPrompts:\n  Speak your wish.\n  What do you wish the agent to do?\n  What is this wish aimed at? Leave blank for prose only."
     )]
     Wish {
         agent: String,
