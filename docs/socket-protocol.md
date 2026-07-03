@@ -15,11 +15,12 @@ integration surfaces are the CLI and the audit record
 ## Framing and connection lifecycle
 
 - Transport: `SOCK_STREAM` Unix domain socket.
-- Framing: newline-delimited JSON — one request line, one response line.
-- Lifecycle: connect → write one request + `\n` → read one response line →
-  connection closes. One session trigger per connection; the response is
-  not written until the session reaches a terminal outcome, so `run`
-  connections stay open for the session's duration.
+- Framing: newline-delimited JSON — one request line, followed by one or
+  more response lines.
+- Lifecycle: connect → write one request + `\n` → read response lines until
+  one terminal `session_outcome` or `error` line → connection closes. One
+  session trigger per connection; `run` connections stay open for the
+  session's duration and may carry progress lines before the terminal line.
 - An empty connection (EOF before a line) is ignored. A malformed request
   line gets an `error` response.
 
@@ -58,6 +59,12 @@ target prompt; `agentd run --intent` has no target flag.
 
 `{"type": "pong"}` — answer to `ping`.
 
+`{"type": "progress", "progress": {"stage": "dispatch_started", ...}}` —
+non-terminal live progress for a run request. `agentd wish` and `agentd run`
+render these frames in the invoking terminal while they wait for the terminal
+outcome; `--progress summary` is the default and `--progress full` includes
+all fields carried by the frame.
+
 `{"type": "error", "message": "..."}` — the request was rejected before a
 session outcome existed (malformed request, unknown agent, dispatch
 failure).
@@ -66,6 +73,15 @@ failure).
 session ran to a terminal outcome. A `session_outcome` response means the
 transport and dispatch succeeded; the work may still have failed — read
 `status`.
+
+### Progress stages
+
+`dispatch_started` means the daemon has accepted the run request on the
+operator connection and is dispatching it into session execution:
+
+```json
+{"type":"progress","progress":{"stage":"dispatch_started","agent":"site-builder","work_unit":"issue-42","input_present":false}}
+```
 
 ## Outcome statuses
 

@@ -259,6 +259,40 @@ fn operator_intent_documentation_describes_wish_and_run_intent_boundaries() {
 }
 
 #[test]
+fn manual_session_documentation_describes_live_progress_observation() {
+    let readme = read_workspace_file("README.md");
+    let quickstart = read_workspace_file("docs/quickstart.md");
+    let socket_protocol = read_workspace_file("docs/socket-protocol.md");
+    let architecture = read_workspace_file("ARCHITECTURE.md");
+    let changelog = read_workspace_file("CHANGELOG.md");
+
+    assert!(
+        readme.contains("`agentd wish` and `agentd run` stream live session progress")
+            && readme.contains("--progress summary")
+            && readme.contains("--progress full"),
+        "README should document live progress and its verbosity controls"
+    );
+    assert!(
+        quickstart.contains("streams live progress in that terminal"),
+        "quickstart should tell operators that the launching command shows progress"
+    );
+    assert!(
+        socket_protocol.contains("\"type\": \"progress\"")
+            && socket_protocol.contains("dispatch_started")
+            && socket_protocol.contains("--progress full"),
+        "socket protocol docs should describe progress frames and CLI rendering levels"
+    );
+    assert!(
+        architecture.contains("progress frames over that same client connection"),
+        "ARCHITECTURE.md should explain that live observation stays on the manual client connection"
+    );
+    assert!(
+        changelog.contains("stream live session progress"),
+        "CHANGELOG.md should record the operator-facing live progress feature"
+    );
+}
+
+#[test]
 fn release_adoption_verification_checks_hostile_user_config_cannot_override_workspace_pins() {
     let script = read_workspace_file("scripts/verify-release-adoption.sh");
 
