@@ -27,6 +27,8 @@ const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
 const RUNTIME_DIR_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
+const MAX_PROGRESS_FRAME_BYTES: usize = 128 * 1024;
+const TERMINAL_RESPONSE_RESERVE_BYTES: usize = 16 * 1024;
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -488,6 +490,19 @@ fn render_progress<W: Write>(
     level: LiveObservationLevel,
     writer: &mut W,
 ) -> Result<(), ClientError> {
+    writeln!(
+        writer,
+        "{}",
+        render_operator_progress_line(&progress, level)
+    )?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn render_operator_progress_line(
+    progress: &ProgressMessage,
+    level: LiveObservationLevel,
+) -> String {
     match (progress, level) {
         (
             ProgressMessage::DispatchStarted {
@@ -496,9 +511,13 @@ fn render_progress<W: Write>(
             LiveObservationLevel::Summary,
         ) => {
             if let Some(work_unit) = work_unit {
-                writeln!(writer, "session running: {agent} ({work_unit})")?;
+                format!(
+                    "session running: {} ({})",
+                    OperatorField(agent),
+                    OperatorField(work_unit)
+                )
             } else {
-                writeln!(writer, "session running: {agent}")?;
+                format!("session running: {}", OperatorField(agent))
             }
         }
         (
@@ -508,31 +527,44 @@ fn render_progress<W: Write>(
                 input_present,
             },
             LiveObservationLevel::Full,
-        ) => {
-            writeln!(
-                writer,
-                "session running: agent={agent} work_unit={} input={}",
-                work_unit.as_deref().unwrap_or("-"),
-                if input_present { "present" } else { "absent" }
-            )?;
-        }
+        ) => format!(
+            "session running: agent={} work_unit={} input={}",
+            OperatorField(agent),
+            work_unit
+                .as_deref()
+                .map(OperatorField)
+                .unwrap_or(OperatorField("-")),
+            if *input_present { "present" } else { "absent" }
+        ),
         (ProgressMessage::TranscriptEvent { line, .. }, LiveObservationLevel::Summary) => {
-            writeln!(
-                writer,
-                "session event: {}",
-                summarize_transcript_event(&line)
-            )?;
+            let summary = summarize_transcript_event(line);
+            format!("session event: {}", OperatorField(&summary))
         }
         (ProgressMessage::TranscriptEvent { session_id, line }, LiveObservationLevel::Full) => {
-            writeln!(
-                writer,
-                "session event: session_id={session_id} {}",
-                escape_control_chars(&line)
-            )?;
+            format!(
+                "session event: session_id={} {}",
+                OperatorField(session_id),
+                OperatorField(line)
+            )
         }
     }
-    writer.flush()?;
-    Ok(())
+}
+
+struct OperatorField<'a>(&'a str);
+
+impl fmt::Display for OperatorField<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for character in self.0.chars() {
+            if character.is_control() {
+                for escaped in character.escape_default() {
+                    write!(f, "{escaped}")?;
+                }
+            } else {
+                write!(f, "{character}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn summarize_transcript_event(line: &str) -> String {
@@ -543,25 +575,9 @@ fn summarize_transcript_event(line: &str) -> String {
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
                 .filter(|kind| !kind.is_empty())
-                .map(escape_transcript_event_kind)
+                .map(str::to_string)
         })
         .unwrap_or_else(|| "unparsed_event".to_string())
-}
-
-fn escape_transcript_event_kind(kind: &str) -> String {
-    kind.chars().flat_map(char::escape_default).collect()
-}
-
-fn escape_control_chars(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        if character.is_control() {
-            escaped.extend(character.escape_default());
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
@@ -732,18 +748,34 @@ fn try_write_progress_response(
     let mut payload = serde_json::to_vec(response)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     payload.push(b'\n');
+    if payload.len() > MAX_PROGRESS_FRAME_BYTES {
+        tracing::debug!(
+            event = "agentd.manual_run_progress_dropped",
+            frame_bytes = payload.len(),
+            max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
+            "dropped oversized manual run progress frame"
+        );
+        return Ok(());
+    }
+
+    if !progress_frame_has_reserved_capacity(stream, payload.len())? {
+        tracing::debug!(
+            event = "agentd.manual_run_progress_dropped",
+            frame_bytes = payload.len(),
+            terminal_reserve_bytes = TERMINAL_RESPONSE_RESERVE_BYTES,
+            "dropped manual run progress frame because the client connection is backpressured"
+        );
+        return Ok(());
+    }
 
     stream.set_nonblocking(true)?;
-    let write_result = write_response_nonblocking(stream, &payload);
+    let write_result = write_progress_frame_nonblocking(stream, &payload);
     let restore_result = stream.set_nonblocking(false);
 
     match (write_result, restore_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) if peer_disconnected_during_response(&error) => Ok(()),
-        (Err(error), Ok(())) if progress_response_would_block(&error) => {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-            Ok(())
-        }
+        (Err(error), Ok(())) if progress_response_would_block(&error) => Ok(()),
         (Err(error), Ok(())) => Err(error),
         (Ok(()), Err(error)) => Err(error),
         (Err(write_error), Err(restore_error)) => {
@@ -757,25 +789,66 @@ fn try_write_progress_response(
     }
 }
 
-fn write_response_nonblocking(stream: &mut UnixStream, mut bytes: &[u8]) -> Result<(), io::Error> {
-    while !bytes.is_empty() {
-        match stream.write(bytes) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to write progress response",
-                ));
-            }
-            Ok(written) => bytes = &bytes[written..],
-            Err(error) if peer_disconnected_during_response(&error) => return Ok(()),
-            Err(error) => return Err(error),
-        }
-    }
-
-    match stream.flush() {
-        Ok(()) => Ok(()),
+fn write_progress_frame_nonblocking(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+) -> Result<(), io::Error> {
+    match stream.write(bytes) {
+        Ok(written) if written == bytes.len() => Ok(()),
+        Ok(0) => Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "failed to write progress response",
+        )),
+        Ok(written) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "partial progress frame write accepted {written} of {}",
+                bytes.len()
+            ),
+        )),
         Err(error) if peer_disconnected_during_response(&error) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn progress_frame_has_reserved_capacity(
+    stream: &UnixStream,
+    frame_bytes: usize,
+) -> Result<bool, io::Error> {
+    let send_buffer_bytes = socket_send_buffer_bytes(stream)?;
+    let queued_bytes = socket_queued_output_bytes(stream)?;
+    Ok(queued_bytes.saturating_add(frame_bytes)
+        <= send_buffer_bytes.saturating_sub(TERMINAL_RESPONSE_RESERVE_BYTES))
+}
+
+fn socket_send_buffer_bytes(stream: &UnixStream) -> Result<usize, io::Error> {
+    let mut size = 0_i32;
+    let mut size_len = std::mem::size_of::<i32>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &mut size as *mut i32 as *mut libc::c_void,
+            &mut size_len,
+        )
+    };
+    if result == 0 {
+        usize::try_from(size)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "SO_SNDBUF was negative"))
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn socket_queued_output_bytes(stream: &UnixStream) -> Result<usize, io::Error> {
+    let mut queued = 0_i32;
+    let result = unsafe { libc::ioctl(stream.as_raw_fd(), libc::TIOCOUTQ, &mut queued) };
+    if result == 0 {
+        usize::try_from(queued)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "TIOCOUTQ was negative"))
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -1190,7 +1263,7 @@ source = "AGENTD_GITHUB_TOKEN"
 
         super::render_progress(
             ProgressMessage::TranscriptEvent {
-                session_id: "fake-session-1".to_string(),
+                session_id: "fake-session-1\rspoof".to_string(),
                 line: "{\"kind\":\"agent_input\"}\nspoof\u{1b}[2J".to_string(),
             },
             LiveObservationLevel::Full,
@@ -1201,12 +1274,41 @@ source = "AGENTD_GITHUB_TOKEN"
         let output = String::from_utf8(output).expect("full progress should be utf8");
         assert_eq!(
             output,
-            "session event: session_id=fake-session-1 {\"kind\":\"agent_input\"}\\nspoof\\u{1b}[2J\n"
+            "session event: session_id=fake-session-1\\rspoof {\"kind\":\"agent_input\"}\\nspoof\\u{1b}[2J\n"
         );
         assert!(
             !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
             "full output should not contain embedded terminal controls: {output:?}"
         );
+    }
+
+    #[test]
+    fn dispatch_progress_escapes_untrusted_request_fields_at_every_level() {
+        for level in [LiveObservationLevel::Summary, LiveObservationLevel::Full] {
+            let mut output = Vec::new();
+
+            super::render_progress(
+                ProgressMessage::DispatchStarted {
+                    agent: "site-builder\nspoof\u{1b}[2J".to_string(),
+                    work_unit: Some("issue-122\rrewrite".to_string()),
+                    input_present: true,
+                },
+                level,
+                &mut output,
+            )
+            .expect("dispatch progress should render");
+
+            let output = String::from_utf8(output).expect("dispatch progress should be utf8");
+            assert!(
+                output.contains("site-builder\\nspoof\\u{1b}[2J")
+                    && output.contains("issue-122\\rrewrite"),
+                "dispatch output should escape request fields: {output:?}"
+            );
+            assert!(
+                !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
+                "dispatch output should not contain embedded terminal controls: {output:?}"
+            );
+        }
     }
 
     #[test]

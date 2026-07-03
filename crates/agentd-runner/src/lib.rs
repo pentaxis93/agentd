@@ -66,6 +66,7 @@ use validation::{validate_invocation, validate_spec};
 
 const TRANSCRIPT_EVENTS_FILE: &str = "events.jsonl";
 const TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_LIVE_TRANSCRIPT_LINE_BYTES: usize = 32 * 1024;
 
 /// Executes a single session from validation through teardown.
 ///
@@ -338,30 +339,65 @@ fn observe_transcript_events(
         }
     };
 
-    let mut pending_line = String::new();
+    let mut pending_line = Vec::new();
+    let mut dropping_oversized_line = false;
     loop {
-        let mut chunk = String::new();
-        match reader.read_line(&mut chunk) {
-            Ok(0) => {
+        let consumed = match reader.fill_buf() {
+            Ok([]) => {
                 if stop.load(Ordering::Acquire) {
                     return;
                 }
                 thread::sleep(TRANSCRIPT_POLL_INTERVAL);
+                continue;
             }
-            Ok(_) => {
-                let line_complete = chunk.ends_with('\n');
-                pending_line.push_str(&chunk);
-                if line_complete {
-                    let line = pending_line.trim_end_matches(['\r', '\n']).to_string();
-                    pending_line.clear();
-                    if line.trim().is_empty() {
+            Ok(buffer) => {
+                let mut consumed = 0;
+                while consumed < buffer.len() {
+                    let remaining = &buffer[consumed..];
+                    let segment_len = remaining
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .map_or(remaining.len(), |newline| newline + 1);
+                    let segment = &remaining[..segment_len];
+                    let line_complete = segment.ends_with(b"\n");
+
+                    if dropping_oversized_line {
+                        if line_complete {
+                            dropping_oversized_line = false;
+                        }
+                        consumed += segment_len;
                         continue;
                     }
-                    progress.observe(SessionProgressEvent::TranscriptEvent {
-                        session_id: session_id.to_string(),
-                        line,
-                    });
+
+                    if pending_line.len().saturating_add(segment.len())
+                        > MAX_LIVE_TRANSCRIPT_LINE_BYTES
+                    {
+                        pending_line.clear();
+                        dropping_oversized_line = !line_complete;
+                        tracing::debug!(
+                            event = "runner.transcript_progress_oversized_record_dropped",
+                            session_id = session_id,
+                            max_bytes = MAX_LIVE_TRANSCRIPT_LINE_BYTES,
+                            "dropped oversized live transcript progress record"
+                        );
+                        consumed += segment_len;
+                        continue;
+                    }
+
+                    pending_line.extend_from_slice(segment);
+                    consumed += segment_len;
+
+                    if line_complete {
+                        if let Some(line) = live_transcript_line_from_bytes(&pending_line) {
+                            progress.observe(SessionProgressEvent::TranscriptEvent {
+                                session_id: session_id.to_string(),
+                                line,
+                            });
+                        }
+                        pending_line.clear();
+                    }
                 }
+                consumed
             }
             Err(error) => {
                 tracing::warn!(
@@ -373,8 +409,26 @@ fn observe_transcript_events(
                 );
                 return;
             }
-        }
+        };
+
+        reader.consume(consumed);
     }
+}
+
+fn live_transcript_line_from_bytes(bytes: &[u8]) -> Option<String> {
+    let line = String::from_utf8_lossy(trim_line_end_bytes(bytes)).into_owned();
+    if line.trim().is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+fn trim_line_end_bytes(mut bytes: &[u8]) -> &[u8] {
+    while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 fn open_live_transcript_events(path: &Path) -> Result<File, io::Error> {
@@ -564,6 +618,73 @@ mod tests {
                     session_id: "session-123".to_string(),
                     line: r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working"}"#.to_string(),
                 }
+            );
+
+            stop.store(true, Ordering::Release);
+            handle.join().expect("observer should not panic");
+        });
+        fs::remove_dir_all(transcript_dir).expect("transcript dir should be removed");
+    }
+
+    #[test]
+    fn transcript_observer_drops_oversized_records_whole_and_resumes_after_newline() {
+        let transcript_dir = unique_temp_dir("agentd-live-transcript-observer-oversized");
+        fs::create_dir_all(&transcript_dir).expect("transcript dir should be created");
+        let events_path = transcript_dir.join(TRANSCRIPT_EVENTS_FILE);
+        fs::write(&events_path, "").expect("transcript events should be created");
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let observer = |event| {
+                tx.send(event).expect("progress event should send");
+            };
+            let observer_transcript_dir = &transcript_dir;
+            let observer_stop = &stop;
+            let handle = scope.spawn(move || {
+                observe_transcript_events(
+                    observer_transcript_dir,
+                    "session-123",
+                    &observer,
+                    observer_stop,
+                );
+            });
+
+            let mut events = fs::OpenOptions::new()
+                .append(true)
+                .open(&events_path)
+                .expect("transcript events should reopen");
+            events
+                .write_all(&vec![b'x'; MAX_LIVE_TRANSCRIPT_LINE_BYTES + 1])
+                .expect("oversized unterminated transcript event should be written");
+            events
+                .flush()
+                .expect("oversized transcript event should flush");
+
+            assert!(
+                rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "observer must not report an oversized unterminated transcript record"
+            );
+
+            events
+                .write_all(
+                    br#"
+{"schema_version":1,"source":"runa","kind":"agent_input","content":"after oversized"}
+"#,
+                )
+                .expect("oversized terminator and valid event should be written");
+            events.flush().expect("valid transcript event should flush");
+
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(2))
+                    .expect("observer should report the valid event after oversized drop"),
+                SessionProgressEvent::TranscriptEvent {
+                    session_id: "session-123".to_string(),
+                    line: r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"after oversized"}"#.to_string(),
+                }
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "oversized record should be dropped whole, not emitted as a fragment"
             );
 
             stop.store(true, Ordering::Release);
