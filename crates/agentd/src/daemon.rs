@@ -538,9 +538,14 @@ fn summarize_transcript_event(line: &str) -> String {
             event
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
+                .filter(|kind| !kind.is_empty())
+                .map(escape_transcript_event_kind)
         })
         .unwrap_or_else(|| "unparsed_event".to_string())
+}
+
+fn escape_transcript_event_kind(kind: &str) -> String {
+    kind.chars().flat_map(char::escape_default).collect()
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
@@ -895,11 +900,12 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonError, ResponseMessage, reap_finished_handlers,
+        DaemonError, LiveObservationLevel, ResponseMessage, reap_finished_handlers,
         run_daemon_until_shutdown_with_reconciler, write_response,
     };
     use crate::config::Config;
     use crate::dispatch::SessionExecutor;
+    use crate::protocol::ProgressMessage;
     use agentd_runner::{
         RunnerError, SessionInvocation, SessionOutcome, SessionProgressObserver, SessionSpec,
         StartupReconciliationReport,
@@ -1065,6 +1071,28 @@ source = "AGENTD_GITHUB_TOKEN"
         assert!(
             result.is_ok(),
             "closed peer during response write should be treated as normal completion"
+        );
+    }
+
+    #[test]
+    fn summary_progress_escapes_untrusted_transcript_event_kind_controls() {
+        let mut output = Vec::new();
+
+        super::render_progress(
+            ProgressMessage::TranscriptEvent {
+                session_id: "fake-session-1".to_string(),
+                line: "{\"kind\":\"agent_input\\nspoof\\u001b[2J\"}".to_string(),
+            },
+            LiveObservationLevel::Summary,
+            &mut output,
+        )
+        .expect("summary progress should render");
+
+        let output = String::from_utf8(output).expect("summary progress should be utf8");
+        assert_eq!(output, "session event: agent_input\\nspoof\\u{1b}[2J\n");
+        assert!(
+            !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
+            "summary output should not contain embedded terminal controls: {output:?}"
         );
     }
 
