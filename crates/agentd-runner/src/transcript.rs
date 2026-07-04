@@ -8,8 +8,13 @@
 use crate::audit::SessionAuditRecord;
 use crate::types::RunnerError;
 use sha2::{Digest, Sha256};
-use std::fs;
-use std::path::PathBuf;
+use std::ffi::{CString, OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 
 pub(crate) const TRANSCRIPT_DEPLOYMENT_ENV: &str = "RUNA_TRANSCRIPT_DEPLOYMENT";
 pub(crate) const TRANSCRIPT_RUN_ID_ENV: &str = "RUNA_TRANSCRIPT_RUN_ID";
@@ -50,6 +55,19 @@ pub(crate) struct TranscriptEventSource {
     identity: TranscriptIdentity,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TranscriptEventFile {
+    path: PathBuf,
+    work_unit_component: OsString,
+}
+
+impl TranscriptEventFile {
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 impl TranscriptEventSource {
     pub(crate) fn from_record(record: &SessionAuditRecord) -> Self {
         Self {
@@ -67,37 +85,76 @@ impl TranscriptEventSource {
             .join(EVENTS_FILE)
     }
 
-    pub(crate) fn discover_event_files(&self) -> Result<Vec<PathBuf>, RunnerError> {
-        let work_units_dir = self.work_units_dir();
-        let entries = match fs::read_dir(&work_units_dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Vec::new());
-            }
-            Err(error) => return Err(RunnerError::Io(error)),
+    pub(crate) fn discover_event_files(&self) -> Result<Vec<TranscriptEventFile>, RunnerError> {
+        let base_dir = open_base_dir(&self.transcript_dir)?;
+        let Some(deployments_dir) = open_optional_dir_at(&base_dir, OsStr::new(DEPLOYMENTS_DIR))?
+        else {
+            return Ok(Vec::new());
+        };
+        let encoded_deployment = encode_path_component(self.identity.deployment());
+        let Some(deployment_dir) =
+            open_optional_dir_at(&deployments_dir, OsStr::new(&encoded_deployment))?
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(work_units_dir) =
+            open_optional_dir_at(&deployment_dir, OsStr::new(WORK_UNITS_DIR))?
+        else {
+            return Ok(Vec::new());
         };
 
-        let encoded_run_id = encode_path_component(self.identity.run_id());
+        let encoded_run_id = OsString::from(encode_path_component(self.identity.run_id()));
+        let work_units_path = self.work_units_dir();
         let mut event_files = Vec::new();
-        for entry in entries {
-            let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        for work_unit_component in read_dir_names(&work_units_dir)? {
+            let Some(metadata) = metadata_at(&work_units_dir, &work_unit_component)? else {
+                continue;
+            };
+            if !is_directory(metadata.st_mode) {
                 continue;
             }
-            let event_path = entry
-                .path()
-                .join(RUNS_DIR)
-                .join(&encoded_run_id)
-                .join(EVENTS_FILE);
-            match fs::symlink_metadata(&event_path) {
-                Ok(_) => event_files.push(event_path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(RunnerError::Io(error)),
+
+            let Some(work_unit_dir) = open_optional_dir_at(&work_units_dir, &work_unit_component)?
+            else {
+                continue;
+            };
+            let Some(runs_dir) = open_optional_dir_at(&work_unit_dir, OsStr::new(RUNS_DIR))? else {
+                continue;
+            };
+            let Some(run_dir) = open_optional_dir_at(&runs_dir, &encoded_run_id)? else {
+                continue;
+            };
+            if entry_exists_at(&run_dir, OsStr::new(EVENTS_FILE))? {
+                let path = work_units_path
+                    .join(&work_unit_component)
+                    .join(RUNS_DIR)
+                    .join(&encoded_run_id)
+                    .join(EVENTS_FILE);
+                event_files.push(TranscriptEventFile {
+                    path,
+                    work_unit_component,
+                });
             }
         }
-        event_files.sort();
+        event_files.sort_by(|left, right| left.path.cmp(&right.path));
         Ok(event_files)
+    }
+
+    pub(crate) fn open_event_file(
+        &self,
+        event_file: &TranscriptEventFile,
+    ) -> Result<File, RunnerError> {
+        let base_dir = open_base_dir(&self.transcript_dir)?;
+        let deployments_dir = open_required_dir_at(&base_dir, OsStr::new(DEPLOYMENTS_DIR))?;
+        let encoded_deployment = encode_path_component(self.identity.deployment());
+        let deployment_dir =
+            open_required_dir_at(&deployments_dir, OsStr::new(&encoded_deployment))?;
+        let work_units_dir = open_required_dir_at(&deployment_dir, OsStr::new(WORK_UNITS_DIR))?;
+        let work_unit_dir = open_required_dir_at(&work_units_dir, &event_file.work_unit_component)?;
+        let runs_dir = open_required_dir_at(&work_unit_dir, OsStr::new(RUNS_DIR))?;
+        let encoded_run_id = OsString::from(encode_path_component(self.identity.run_id()));
+        let run_dir = open_required_dir_at(&runs_dir, &encoded_run_id)?;
+        open_regular_file_at(&run_dir, OsStr::new(EVENTS_FILE))
     }
 
     fn work_units_dir(&self) -> PathBuf {
@@ -106,6 +163,180 @@ impl TranscriptEventSource {
             .join(encode_path_component(self.identity.deployment()))
             .join(WORK_UNITS_DIR)
     }
+}
+
+fn open_base_dir(path: &Path) -> Result<File, RunnerError> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
+                unsafe_transcript_path_error(&path.display().to_string(), "is not a directory")
+            }
+            _ => RunnerError::Io(error),
+        })
+}
+
+fn open_required_dir_at(parent: &File, component: &OsStr) -> Result<File, RunnerError> {
+    open_optional_dir_at(parent, component)?.ok_or_else(|| {
+        RunnerError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "transcript directory component not found: {}",
+                component.to_string_lossy()
+            ),
+        ))
+    })
+}
+
+fn open_optional_dir_at(parent: &File, component: &OsStr) -> Result<Option<File>, RunnerError> {
+    let component = cstring_component(component)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            component.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd >= 0 {
+        return Ok(Some(unsafe { File::from_raw_fd(fd) }));
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOENT) => Ok(None),
+        Some(libc::ELOOP) | Some(libc::ENOTDIR) => Err(unsafe_transcript_path_error(
+            &component.to_string_lossy(),
+            "is not a directory",
+        )),
+        _ => Err(RunnerError::Io(error)),
+    }
+}
+
+fn read_dir_names(dir: &File) -> Result<Vec<OsString>, RunnerError> {
+    let proc_fd_path = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()));
+    let mut names = Vec::new();
+    for entry in fs::read_dir(proc_fd_path)? {
+        names.push(entry?.file_name());
+    }
+    Ok(names)
+}
+
+fn metadata_at(parent: &File, component: &OsStr) -> Result<Option<libc::stat>, RunnerError> {
+    let component = cstring_component(component)?;
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            component.as_ptr(),
+            metadata.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        return Ok(Some(unsafe { metadata.assume_init() }));
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOENT) => Ok(None),
+        _ => Err(RunnerError::Io(error)),
+    }
+}
+
+fn entry_exists_at(parent: &File, component: &OsStr) -> Result<bool, RunnerError> {
+    metadata_at(parent, component).map(|metadata| metadata.is_some())
+}
+
+fn open_regular_file_at(parent: &File, component: &OsStr) -> Result<File, RunnerError> {
+    let metadata = metadata_at(parent, component)?.ok_or_else(|| {
+        RunnerError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "transcript event file not found: {}",
+                component.to_string_lossy()
+            ),
+        ))
+    })?;
+    if !is_regular_file(metadata.st_mode) {
+        return Err(unsafe_transcript_artifact_error(
+            EVENTS_FILE,
+            "is not a regular file",
+        ));
+    }
+
+    let component = cstring_component(component)?;
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            component.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ELOOP) => {
+                unsafe_transcript_artifact_error(EVENTS_FILE, "is not a regular file")
+            }
+            _ => RunnerError::Io(error),
+        });
+    }
+
+    let file = unsafe { File::from_raw_fd(fd) };
+    let mut open_metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let result = unsafe { libc::fstat(file.as_raw_fd(), open_metadata.as_mut_ptr()) };
+    if result != 0 {
+        return Err(RunnerError::Io(io::Error::last_os_error()));
+    }
+    let open_metadata = unsafe { open_metadata.assume_init() };
+    if !is_regular_file(open_metadata.st_mode)
+        || open_metadata.st_dev != metadata.st_dev
+        || open_metadata.st_ino != metadata.st_ino
+    {
+        return Err(unsafe_transcript_artifact_error(
+            EVENTS_FILE,
+            "is not a regular file",
+        ));
+    }
+
+    Ok(file)
+}
+
+fn cstring_component(component: &OsStr) -> Result<CString, RunnerError> {
+    if component.as_bytes().contains(&b'/') {
+        return Err(unsafe_transcript_path_error(
+            &component.to_string_lossy(),
+            "contains a path separator",
+        ));
+    }
+    CString::new(component.as_bytes()).map_err(|error| {
+        RunnerError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path component contains interior nul byte: {error}"),
+        ))
+    })
+}
+
+fn is_directory(mode: libc::mode_t) -> bool {
+    (mode & libc::S_IFMT) == libc::S_IFDIR
+}
+
+fn is_regular_file(mode: libc::mode_t) -> bool {
+    (mode & libc::S_IFMT) == libc::S_IFREG
+}
+
+fn unsafe_transcript_path_error(component: &str, reason: &str) -> RunnerError {
+    RunnerError::Io(io::Error::other(format!(
+        "unsafe transcript path: {component} {reason}"
+    )))
+}
+
+fn unsafe_transcript_artifact_error(artifact: &str, reason: &str) -> RunnerError {
+    RunnerError::Io(io::Error::other(format!(
+        "unsafe transcript artifact: {artifact} {reason}"
+    )))
 }
 
 #[cfg(test)]
