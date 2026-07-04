@@ -381,11 +381,13 @@ persists on the host under the resolved audit root
 `<audit_root>/<agent>/<session_id>/`, with runa state in `runa/`, agentd
 metadata in `agentd/session.json`, and transcript artifacts in
 `agentd/transcript/`. Transcript artifacts include structured JSON Lines events
-at `events.jsonl`, a human-readable `transcript.md`, and `manifest.json` with
-coverage of `full`, `missing_mcp_events`, `no_events`, or
-`finalization_failed`. Full MCP tool-call coverage depends on the agent runtime
-launching `runa-mcp`; otherwise the transcript still records the observable runa
-boundary without claiming MCP events that never occurred.
+under `deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl`,
+a human-readable `transcript.md`, and `manifest.json` with coverage of `full`,
+`missing_mcp_events`, `no_events`, or `finalization_failed`. agentd injects the
+deployment and run id that address the runa event store, and the manifest records
+the runa event schema versions it assembled. Full MCP tool-call coverage depends
+on the agent runtime launching `runa-mcp`; otherwise the transcript still records
+the observable runa boundary without claiming MCP events that never occurred.
 
 If teardown cleanup fails, or if audit finalization attempts closeout and
 fails, metadata remains intentionally incomplete with no `end_timestamp` or

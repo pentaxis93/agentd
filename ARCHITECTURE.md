@@ -200,7 +200,7 @@ The runner prepares the execution environment:
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner drops privileges with `gosu` and launches `runa run --agent-command -- <argv>` as the unprivileged session user from `/home/{username}/repo`. When the invocation includes `work_unit`, agentd materializes that operator-supplied reference as `intent/operator-input.json` with `target` set to the reference, then leaves resolution to runa's unscoped resolving entry so unresolved references fail closed before scoped work begins. The argv comes from the declarative agent command, and `runa run` owns protocol execution from there. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange. agentd sets `RUNA_TRANSCRIPT_DIR=/agentd/transcript` and `RUNA_TRANSCRIPT_REDACT_ENV` so runa can persist the execution events it observes.
+The runner drops privileges with `gosu` and launches `runa run --agent-command -- <argv>` as the unprivileged session user from `/home/{username}/repo`. When the invocation includes `work_unit`, agentd materializes that operator-supplied reference as `intent/operator-input.json` with `target` set to the reference, then leaves resolution to runa's unscoped resolving entry so unresolved references fail closed before scoped work begins. The argv comes from the declarative agent command, and `runa run` owns protocol execution from there. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange. agentd sets `RUNA_TRANSCRIPT_DIR=/agentd/transcript`, `RUNA_TRANSCRIPT_DEPLOYMENT`, `RUNA_TRANSCRIPT_RUN_ID`, and `RUNA_TRANSCRIPT_REDACT_ENV` so runa can persist the execution events it observes at an agentd-addressable nested path without linking agentd to runa internals.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
@@ -314,12 +314,14 @@ Host audit records live under the resolved audit root, by default
 layout:
 
 - `runa/` — preserved runa state written naturally by the runtime
-- `agentd/transcript/events.jsonl` — structured transcript events emitted by
-  runa and runa-mcp when observable
+- `agentd/transcript/deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl` — structured transcript events emitted by
+  runa and runa-mcp when observable; deployment and run id are agentd-owned
+  values injected through the runa environment
 - `agentd/transcript/transcript.md` — human-readable rendering of the event
   stream
-- `agentd/transcript/manifest.json` — transcript schema version and coverage:
-  `full`, `missing_mcp_events`, `no_events`, or `finalization_failed`
+- `agentd/transcript/manifest.json` — transcript manifest schema version,
+  event schema versions, and coverage: `full`, `missing_mcp_events`,
+  `no_events`, or `finalization_failed`
 - `agentd/session.json` — agentd-written metadata (`schema_version: 2`,
   `session_id`, `agent`, `repo_url`, optional `work_unit`, timestamps, outcome,
   exit code when applicable) written by atomic temp-file replacement within the
