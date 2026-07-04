@@ -666,7 +666,7 @@ impl fmt::Display for ConfigError {
             }
             ConfigError::InvalidCredentialName { agent, name } => write!(
                 f,
-                "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ',' or '=' and must not use runner-owned names such as AGENT_NAME, GROUNDWORK_FORGE_TYPE, AGENTD_WORK_UNIT, AGENTD_REPO_TOKEN, RUNA_TRANSCRIPT_DIR, or RUNA_TRANSCRIPT_REDACT_ENV; transcript subsystem names are set internally"
+                "agent '{agent}' defines invalid credential name '{name}'; credential names must not contain ',' or '=' and must not use runner-owned names such as AGENT_NAME, GROUNDWORK_FORGE_TYPE, AGENTD_WORK_UNIT, AGENTD_REPO_TOKEN, RUNA_TRANSCRIPT_DIR, RUNA_TRANSCRIPT_DEPLOYMENT, RUNA_TRANSCRIPT_RUN_ID, or RUNA_TRANSCRIPT_REDACT_ENV; transcript subsystem names are set internally"
             ),
             ConfigError::EmptyField {
                 field,

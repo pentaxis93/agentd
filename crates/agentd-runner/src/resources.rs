@@ -580,6 +580,11 @@ mod tests {
             agent: "site-builder".to_string(),
             repo_url: "https://example.com/repo.git".to_string(),
             work_unit: None,
+            transcript_identity: crate::transcript::TranscriptIdentity::new(
+                "github",
+                "https://example.com/repo.git",
+                session_id,
+            ),
             start_timestamp: "2026-04-16T00:00:00Z".to_string(),
         }
     }

@@ -16,6 +16,7 @@ use crate::session_paths::{
     session_home_dir, session_internal_audit_dir, session_internal_audit_runa_dir,
     session_repo_dir, session_repo_runa_dir, session_transcript_mount_dir,
 };
+use crate::transcript::{TRANSCRIPT_DEPLOYMENT_ENV, TRANSCRIPT_RUN_ID_ENV, TranscriptIdentity};
 use crate::types::{BindMount, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{
     REPO_TOKEN_ENV, RepoUrlKind, TRANSCRIPT_DIR_ENV, TRANSCRIPT_REDACT_ENV, repo_url_kind,
@@ -183,6 +184,7 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 fn build_container_script(
     spec: &SessionSpec,
     invocation: &SessionInvocation,
+    transcript_identity: &TranscriptIdentity,
     resolved_input: Option<&ResolvedInvocationInput>,
 ) -> String {
     let username = &spec.agent_name;
@@ -261,6 +263,14 @@ fn build_container_script(
     script.push_str(&shell_quote(
         &session_transcript_mount_dir().display().to_string(),
     ));
+    script.push_str("\nexport ");
+    script.push_str(TRANSCRIPT_DEPLOYMENT_ENV);
+    script.push('=');
+    script.push_str(&shell_quote(transcript_identity.deployment()));
+    script.push_str("\nexport ");
+    script.push_str(TRANSCRIPT_RUN_ID_ENV);
+    script.push('=');
+    script.push_str(&shell_quote(transcript_identity.run_id()));
     let redact_env = transcript_redact_environment(spec, invocation);
     script.push_str("\nexport ");
     script.push_str(TRANSCRIPT_REDACT_ENV);
@@ -484,7 +494,12 @@ fn build_create_container_args(
     args.push("/bin/sh".to_string());
     args.push(spec.base_image.clone());
     args.push("-lc".to_string());
-    args.push(build_container_script(spec, invocation, resolved_input));
+    args.push(build_container_script(
+        spec,
+        invocation,
+        &resources.audit_record.transcript_identity,
+        resolved_input,
+    ));
 
     args
 }
