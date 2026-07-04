@@ -385,9 +385,11 @@ under `deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.json
 a human-readable `transcript.md`, and `manifest.json` with coverage of `full`,
 `missing_mcp_events`, `no_events`, or `finalization_failed`. agentd injects the
 deployment and run id that address the runa event store, and the manifest records
-the runa event schema versions it assembled. Full MCP tool-call coverage depends
-on the agent runtime launching `runa-mcp`; otherwise the transcript still records
-the observable runa boundary without claiming MCP events that never occurred.
+the runa event schema versions it assembled. Nested transcript reads refuse
+symlinked ancestors below `agentd/transcript` rather than following them outside
+the audit record. Full MCP tool-call coverage depends on the agent runtime
+launching `runa-mcp`; otherwise the transcript still records the observable runa
+boundary without claiming MCP events that never occurred.
 
 If teardown cleanup fails, or if audit finalization attempts closeout and
 fails, metadata remains intentionally incomplete with no `end_timestamp` or

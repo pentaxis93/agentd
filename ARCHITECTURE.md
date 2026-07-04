@@ -316,7 +316,9 @@ layout:
 - `runa/` — preserved runa state written naturally by the runtime
 - `agentd/transcript/deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl` — structured transcript events emitted by
   runa and runa-mcp when observable; deployment and run id are agentd-owned
-  values injected through the runa environment
+  values injected through the runa environment. agentd opens this nested path
+  component by component from the trusted transcript base without following
+  symlinked ancestors.
 - `agentd/transcript/transcript.md` — human-readable rendering of the event
   stream
 - `agentd/transcript/manifest.json` — transcript manifest schema version,

@@ -82,7 +82,9 @@ the manifest never overstates what the transcript captured.
 agentd sets `RUNA_TRANSCRIPT_DEPLOYMENT` and `RUNA_TRANSCRIPT_RUN_ID` before
 launching runa. It reads event files only below the matching nested deployment
 and run id, while allowing multiple work-unit stage directories to appear
-during one session.
+during one session. Every nested directory component below the trusted
+`agentd/transcript` base is traversed without following symlinks, and unsafe
+symlinked ancestors are refused rather than read through.
 
 ## Change policy
 
