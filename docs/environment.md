@@ -28,6 +28,8 @@ only the environment.
 | `AGENTD_WORK_UNIT` | the `--work-unit` identifier, when present | session tooling |
 | `AGENTD_REPO_TOKEN` | the resolved repo token, when configured | the generated clone step only: consumed for the one HTTPS `git clone` and unset before the agent command runs — it cannot authorize pushes. HTTPS pushes need a credential delivered via `[[agents.credentials]]`; SSH pushes use the mounted `.ssh` identity |
 | `RUNA_TRANSCRIPT_DIR` | the mounted transcript directory | runa / runa-mcp transcript emission |
+| `RUNA_TRANSCRIPT_DEPLOYMENT` | deterministic project identity composed by agentd from the session forge type and repository URL | runa transcript path selection |
+| `RUNA_TRANSCRIPT_RUN_ID` | the agentd session id for this run | runa transcript path selection |
 | `RUNA_TRANSCRIPT_REDACT_ENV` | names of session env vars whose values must be redacted from transcripts | runa / runa-mcp |
 | credential `name` variables (e.g. `GITHUB_TOKEN`) | value of the corresponding daemon-side `source` variable, delivered via ephemeral podman secret | agent process |
 

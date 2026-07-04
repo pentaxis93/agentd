@@ -53,7 +53,8 @@ pub struct SessionSpec {
     /// are passed as direct `--env` assignments.
     /// Names reserved for runner-owned values such as `AGENT_NAME`,
     /// `GROUNDWORK_FORGE_TYPE`, `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`,
-    /// `RUNA_TRANSCRIPT_DIR`, and `RUNA_TRANSCRIPT_REDACT_ENV` are rejected
+    /// `RUNA_TRANSCRIPT_DIR`, `RUNA_TRANSCRIPT_DEPLOYMENT`,
+    /// `RUNA_TRANSCRIPT_RUN_ID`, and `RUNA_TRANSCRIPT_REDACT_ENV` are rejected
     /// during validation.
     pub environment: Vec<ResolvedEnvironmentVariable>,
 }
@@ -435,7 +436,10 @@ impl fmt::Display for RunnerError {
             RunnerError::ReservedEnvironmentName { name } => {
                 if matches!(
                     name.as_str(),
-                    "RUNA_TRANSCRIPT_DIR" | "RUNA_TRANSCRIPT_REDACT_ENV"
+                    "RUNA_TRANSCRIPT_DIR"
+                        | "RUNA_TRANSCRIPT_DEPLOYMENT"
+                        | "RUNA_TRANSCRIPT_RUN_ID"
+                        | "RUNA_TRANSCRIPT_REDACT_ENV"
                 ) {
                     write!(
                         f,

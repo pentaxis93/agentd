@@ -1712,6 +1712,8 @@ fn rejects_reserved_credential_names() {
     for reserved_name in [
         "AGENT_NAME",
         "RUNA_TRANSCRIPT_DIR",
+        "RUNA_TRANSCRIPT_DEPLOYMENT",
+        "RUNA_TRANSCRIPT_RUN_ID",
         "RUNA_TRANSCRIPT_REDACT_ENV",
     ] {
         let config = format!(
