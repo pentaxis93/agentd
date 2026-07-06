@@ -62,7 +62,7 @@ target prompt; `agentd run --intent` has no target flag.
 `{"type": "progress", "progress": {"stage": "...", ...}}` — non-terminal
 live progress for a run request. `dispatch_started` is a start marker;
 `transcript_event` carries execution-phase events from the running session's
-`agentd/transcript/events.jsonl` stream. `agentd wish` and `agentd run` render
+nested runa transcript event stream. `agentd wish` and `agentd run` render
 these frames in the invoking terminal while they wait for the terminal outcome;
 `--progress summary` prints concise event names and `--progress full` includes
 the raw transcript event line. Progress delivery is best-effort: oversized
