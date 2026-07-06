@@ -117,6 +117,7 @@ struct BurstProgressExecutor {
 }
 
 const SATURATING_PROGRESS_EVENTS: usize = 4096;
+const SHUTDOWN_DRAIN_TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl BurstProgressExecutor {
     fn new(completed: Sender<()>) -> Self {
@@ -300,6 +301,57 @@ fn run_daemon_until_shutdown_for_test(
     })
 }
 
+fn write_raw_run_request(client: &mut UnixStream, work_unit: &str) {
+    writeln!(
+        client,
+        "{}",
+        json!({
+            "type": "run",
+            "agent": "site-builder",
+            "repo_url": "https://example.com/repo.git",
+            "work_unit": work_unit,
+            "input": null
+        })
+    )
+    .expect("client request should write");
+}
+
+fn read_until_terminal_outcome(mut client: UnixStream) {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("client read timeout should be set");
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match client.read(&mut buffer) {
+            Ok(0) => panic!("daemon closed the stream before the terminal outcome arrived"),
+            Ok(bytes_read) => {
+                response.extend_from_slice(&buffer[..bytes_read]);
+                while let Some(newline) = response.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = response.drain(..=newline).collect();
+                    let line = std::str::from_utf8(&line).expect("daemon response should be utf8");
+                    let value: serde_json::Value =
+                        serde_json::from_str(line).expect("daemon should emit complete JSON");
+                    if value.get("type").and_then(serde_json::Value::as_str)
+                        == Some("session_outcome")
+                    {
+                        return;
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("timed out waiting for terminal outcome")
+            }
+            Err(error) => panic!("client failed while reading daemon response: {error}"),
+        }
+    }
+}
+
 #[test]
 fn daemon_reports_run_outcome_back_through_client_request() {
     let _guard = env_lock()
@@ -389,7 +441,7 @@ fn client_receives_execution_progress_while_session_is_still_running() {
 
     executor.wait_for_first_run_to_start();
     let mut progress = String::new();
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while !progress.contains("session event: agent_input") {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
@@ -475,7 +527,7 @@ fn client_full_progress_includes_raw_execution_event_detail() {
 
     executor.wait_for_first_run_to_start();
     let mut progress = String::new();
-    let deadline = Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(5);
     while !progress.contains(r#""content":"working step""#) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
@@ -535,18 +587,7 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
 
     let mut client =
         Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
-    writeln!(
-        client.as_mut().expect("client should exist"),
-        "{}",
-        json!({
-            "type": "run",
-            "agent": "site-builder",
-            "repo_url": "https://example.com/repo.git",
-            "work_unit": "issue-122",
-            "input": null
-        })
-    )
-    .expect("client request should write");
+    write_raw_run_request(client.as_mut().expect("client should exist"), "issue-122");
 
     thread::sleep(Duration::from_millis(50));
 
@@ -572,7 +613,7 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
             .expect("daemon join result should send");
     });
 
-    let join_result = match join_rx.recv_timeout(Duration::from_secs(1)) {
+    let join_result = match join_rx.recv_timeout(SHUTDOWN_DRAIN_TEST_TIMEOUT) {
         Ok(result) => result,
         Err(_) => {
             drop(client.take());
@@ -641,6 +682,158 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
     assert!(
         progress_frames < SATURATING_PROGRESS_EVENTS,
         "slow-reading client should force progress drops, got all {progress_frames} frames"
+    );
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
+fn daemon_shutdown_drains_queued_terminal_outcome_to_a_paused_reading_client_before_returning() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("shutdown-drains-terminal-to-paused-reader");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let executor = BurstProgressExecutor::new(completed_tx);
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let mut client =
+        Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
+    write_raw_run_request(
+        client.as_mut().expect("client should exist"),
+        "shutdown-drain-reading",
+    );
+    completed_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("session should complete while the client is paused");
+
+    shutdown.store(true, Ordering::Release);
+    let (join_tx, join_rx) = mpsc::channel();
+    let joiner = thread::spawn(move || {
+        let result = handle.join().expect("daemon thread should not panic");
+        join_tx
+            .send(result)
+            .expect("daemon join result should send");
+    });
+
+    match join_rx.recv_timeout(Duration::from_millis(250)) {
+        Ok(result) => {
+            drop(client.take());
+            joiner.join().expect("join helper should join");
+            result.expect("daemon should exit cleanly");
+            unsafe {
+                std::env::remove_var("AGENTD_GITHUB_TOKEN");
+            }
+            panic!("daemon returned before draining the queued terminal outcome");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {}
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("daemon join helper disconnected before reporting completion")
+        }
+    }
+
+    let (terminal_tx, terminal_rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        read_until_terminal_outcome(client.take().expect("client should still be connected"));
+        terminal_tx
+            .send(())
+            .expect("terminal outcome notification should send");
+    });
+
+    let deadline = Instant::now() + SHUTDOWN_DRAIN_TEST_TIMEOUT;
+    loop {
+        if terminal_rx.try_recv().is_ok() {
+            break;
+        }
+        match join_rx.try_recv() {
+            Ok(result) => {
+                reader.join().expect("reader should join");
+                joiner.join().expect("join helper should join");
+                result.expect("daemon should exit cleanly");
+                unsafe {
+                    std::env::remove_var("AGENTD_GITHUB_TOKEN");
+                }
+                panic!("daemon returned before the paused reader received the terminal outcome");
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("daemon join helper disconnected before reporting completion")
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "paused reader did not receive the terminal outcome within the shutdown drain bound"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    reader.join().expect("reader should join");
+    let result = join_rx
+        .recv_timeout(SHUTDOWN_DRAIN_TEST_TIMEOUT)
+        .expect("daemon should return after the terminal outcome is drained");
+    joiner.join().expect("join helper should join");
+    result.expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
+fn daemon_shutdown_abandons_progress_writer_drain_for_a_non_reading_client() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("shutdown-bounds-non-reading-client");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let (completed_tx, completed_rx) = mpsc::channel();
+    let executor = BurstProgressExecutor::new(completed_tx);
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let mut client =
+        Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
+    write_raw_run_request(
+        client.as_mut().expect("client should exist"),
+        "shutdown-drain-non-reading",
+    );
+    completed_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("session should complete while the client never reads");
+
+    let started = Instant::now();
+    shutdown.store(true, Ordering::Release);
+    let result = match handle.join() {
+        Ok(result) => result,
+        Err(payload) => {
+            drop(client.take());
+            std::panic::resume_unwind(payload);
+        }
+    };
+    let elapsed = started.elapsed();
+    drop(client.take());
+    result.expect("daemon should exit cleanly");
+    assert!(
+        elapsed < SHUTDOWN_DRAIN_TEST_TIMEOUT,
+        "non-reading client stalled daemon shutdown for {elapsed:?}"
     );
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");

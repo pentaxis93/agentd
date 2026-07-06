@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agentd_runner::{
     RunnerError, SessionOutcome, SessionProgressEvent, StartupReconciliationReport,
@@ -32,6 +32,7 @@ const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 const MAX_PROGRESS_FRAME_BYTES: usize = 128 * 1024;
 const PROGRESS_QUEUE_CAPACITY: usize = 64;
 const PROGRESS_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const PROGRESS_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -215,6 +216,7 @@ where
     runtime.bind_listener()?;
     let executor = Arc::new(executor);
     let mut handlers = Vec::new();
+    let progress_writers = ProgressWriterRegistry::default();
     let scheduler_handle = spawn_scheduler_thread(&config, Arc::clone(&shutdown))?;
     tracing::info!(
         event = "agentd.daemon_started",
@@ -240,6 +242,7 @@ where
                     stream,
                     config.clone(),
                     executor.clone(),
+                    progress_writers.clone(),
                 ));
             }
             Err(error) if accept_was_interrupted(&error) => continue,
@@ -247,10 +250,11 @@ where
         }
     };
 
-    let finish_result = shutdown_daemon(
+    let finish_result = shutdown_daemon_with_progress_writers(
         shutdown.as_ref(),
         || runtime.begin_shutdown(),
         handlers,
+        progress_writers,
         scheduler_handle,
         loop_result,
     );
@@ -259,6 +263,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn shutdown_daemon<F>(
     shutdown: &AtomicBool,
     begin_shutdown: F,
@@ -269,9 +274,31 @@ fn shutdown_daemon<F>(
 where
     F: FnOnce() -> Result<(), io::Error>,
 {
+    shutdown_daemon_with_progress_writers(
+        shutdown,
+        begin_shutdown,
+        handlers,
+        ProgressWriterRegistry::default(),
+        scheduler_handle,
+        loop_result,
+    )
+}
+
+fn shutdown_daemon_with_progress_writers<F>(
+    shutdown: &AtomicBool,
+    begin_shutdown: F,
+    handlers: Vec<JoinHandle<()>>,
+    progress_writers: ProgressWriterRegistry,
+    scheduler_handle: Option<JoinHandle<()>>,
+    loop_result: Result<(), io::Error>,
+) -> Result<(), io::Error>
+where
+    F: FnOnce() -> Result<(), io::Error>,
+{
     shutdown.store(true, Ordering::Release);
     let shutdown_result = begin_shutdown();
     join_connection_handlers(handlers);
+    progress_writers.drain(PROGRESS_SHUTDOWN_DRAIN_TIMEOUT);
     join_scheduler_thread(scheduler_handle);
 
     match (loop_result, shutdown_result) {
@@ -301,12 +328,13 @@ fn spawn_connection_handler<E>(
     stream: UnixStream,
     config: Config,
     executor: Arc<E>,
+    progress_writers: ProgressWriterRegistry,
 ) -> JoinHandle<()>
 where
     E: SessionExecutor + Send + Sync + 'static,
 {
     thread::spawn(move || {
-        handle_connection(stream, &config, executor.as_ref());
+        handle_connection(stream, &config, executor.as_ref(), &progress_writers);
     })
 }
 
@@ -583,8 +611,13 @@ fn summarize_transcript_event(line: &str) -> String {
         .unwrap_or_else(|| "unparsed_event".to_string())
 }
 
-fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
-    if let Err(error) = handle_connection_inner(stream, config, executor) {
+fn handle_connection(
+    stream: UnixStream,
+    config: &Config,
+    executor: &impl SessionExecutor,
+    progress_writers: &ProgressWriterRegistry,
+) {
+    if let Err(error) = handle_connection_inner(stream, config, executor, progress_writers) {
         tracing::warn!(
             event = "agentd.operator_connection_failed",
             error = %error,
@@ -597,6 +630,7 @@ fn handle_connection_inner(
     mut stream: UnixStream,
     config: &Config,
     executor: &impl SessionExecutor,
+    progress_writers: &ProgressWriterRegistry,
 ) -> Result<(), io::Error> {
     let request = {
         let mut reader = BufReader::new(&mut stream);
@@ -629,7 +663,16 @@ fn handle_connection_inner(
             input,
         } => {
             return handle_run_connection(
-                stream, config, executor, agent, repo_url, work_unit, input,
+                stream,
+                config,
+                executor,
+                progress_writers,
+                RunRequest {
+                    agent,
+                    repo_url,
+                    work_unit,
+                    input,
+                },
             );
         }
     };
@@ -641,18 +684,18 @@ fn handle_run_connection(
     stream: UnixStream,
     config: &Config,
     executor: &impl SessionExecutor,
-    agent: String,
-    repo_url: Option<String>,
-    work_unit: Option<String>,
-    input: Option<agentd_runner::InvocationInput>,
+    progress_writers: &ProgressWriterRegistry,
+    request: RunRequest,
 ) -> Result<(), io::Error> {
-    let writer = ProgressWriter::spawn(stream)?;
+    let writer = ProgressWriter::spawn(stream, progress_writers)?;
+    let agent = request.agent.clone();
+    let work_unit = request.work_unit.clone();
     let response = {
         let dispatch_progress = ResponseMessage::Progress {
             progress: ProgressMessage::DispatchStarted {
                 agent: agent.clone(),
                 work_unit: work_unit.clone(),
-                input_present: input.is_some(),
+                input_present: request.input.is_some(),
             },
         };
         let write_progress = |event: SessionProgressEvent| {
@@ -664,12 +707,7 @@ fn handle_run_connection(
         };
         match dispatch_run_after_preflight(
             config,
-            &RunRequest {
-                agent: agent.clone(),
-                repo_url,
-                work_unit: work_unit.clone(),
-                input,
-            },
+            &request,
             executor,
             || {
                 writer.enqueue_dispatch_progress(dispatch_progress);
@@ -725,6 +763,74 @@ fn serialize_response_frame(response: &ResponseMessage) -> Result<Vec<u8>, io::E
     Ok(payload)
 }
 
+#[derive(Clone, Default)]
+struct ProgressWriterRegistry {
+    handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl ProgressWriterRegistry {
+    fn track(&self, handle: JoinHandle<()>) {
+        let mut handles = self
+            .handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reap_finished_progress_writers(&mut handles);
+        handles.push(handle);
+    }
+
+    fn drain(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let active_writers = {
+                let mut handles = self
+                    .handles
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                reap_finished_progress_writers(&mut handles)
+            };
+            if active_writers == 0 {
+                return;
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_writer_shutdown_drain_timed_out",
+                    active_writers,
+                    timeout_ms = timeout.as_millis(),
+                    "abandoned manual run progress writer drain at daemon shutdown deadline"
+                );
+                return;
+            }
+
+            thread::sleep((deadline - now).min(Duration::from_millis(10)));
+        }
+    }
+}
+
+fn reap_finished_progress_writers(handles: &mut Vec<JoinHandle<()>>) -> usize {
+    let mut active = Vec::with_capacity(handles.len());
+    for handle in std::mem::take(handles) {
+        if handle.is_finished() {
+            log_progress_writer_panic(handle);
+        } else {
+            active.push(handle);
+        }
+    }
+    let active_count = active.len();
+    *handles = active;
+    active_count
+}
+
+fn log_progress_writer_panic(handle: JoinHandle<()>) {
+    if handle.join().is_err() {
+        tracing::error!(
+            event = "agentd.manual_run_progress_writer_panicked",
+            "manual run progress writer panicked"
+        );
+    }
+}
+
 #[derive(Clone)]
 struct ProgressWriter {
     shared: Arc<ProgressWriterShared>,
@@ -752,7 +858,7 @@ enum ProgressWriterFrame {
 }
 
 impl ProgressWriter {
-    fn spawn(stream: UnixStream) -> Result<Self, io::Error> {
+    fn spawn(stream: UnixStream, registry: &ProgressWriterRegistry) -> Result<Self, io::Error> {
         stream.set_write_timeout(Some(PROGRESS_WRITE_TIMEOUT))?;
         let shared = Arc::new(ProgressWriterShared {
             state: Mutex::new(ProgressWriterState {
@@ -763,7 +869,7 @@ impl ProgressWriter {
             available: Condvar::new(),
         });
         let writer_shared = Arc::clone(&shared);
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                 run_progress_writer(stream, writer_shared);
             }));
@@ -774,6 +880,7 @@ impl ProgressWriter {
                 );
             }
         });
+        registry.track(handle);
 
         Ok(Self { shared })
     }
