@@ -839,6 +839,7 @@ struct ProgressWriter {
 struct ProgressWriterShared {
     state: Mutex<ProgressWriterState>,
     available: Condvar,
+    max_frame_bytes: usize,
 }
 
 struct ProgressWriterState {
@@ -857,9 +858,17 @@ enum ProgressWriterFrame {
     Terminal(Vec<u8>),
 }
 
+enum ProgressWriterWriteResult {
+    Written,
+    Dropped,
+    PeerDisconnected,
+    TimedOut,
+    Failed(io::Error),
+}
+
 impl ProgressWriter {
     fn spawn(stream: UnixStream, registry: &ProgressWriterRegistry) -> Result<Self, io::Error> {
-        stream.set_write_timeout(Some(PROGRESS_WRITE_TIMEOUT))?;
+        let max_frame_bytes = configure_progress_writer_stream(&stream)?;
         let shared = Arc::new(ProgressWriterShared {
             state: Mutex::new(ProgressWriterState {
                 progress: VecDeque::new(),
@@ -867,6 +876,7 @@ impl ProgressWriter {
                 closed: false,
             }),
             available: Condvar::new(),
+            max_frame_bytes,
         });
         let writer_shared = Arc::clone(&shared);
         let handle = thread::spawn(move || {
@@ -901,11 +911,11 @@ impl ProgressWriter {
                 return;
             }
         };
-        if frame.len() > MAX_PROGRESS_FRAME_BYTES {
+        if frame.len() > self.shared.max_frame_bytes {
             tracing::debug!(
                 event = "agentd.manual_run_progress_dropped",
                 frame_bytes = frame.len(),
-                max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
+                max_frame_bytes = self.shared.max_frame_bytes,
                 "dropped oversized manual run dispatch progress frame"
             );
             return;
@@ -944,11 +954,11 @@ impl ProgressWriter {
             }
         };
 
-        if frame.len() > MAX_PROGRESS_FRAME_BYTES {
+        if frame.len() > self.shared.max_frame_bytes {
             tracing::debug!(
                 event = "agentd.manual_run_progress_dropped",
                 frame_bytes = frame.len(),
-                max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
+                max_frame_bytes = self.shared.max_frame_bytes,
                 "dropped oversized manual run progress frame"
             );
             return;
@@ -1008,28 +1018,39 @@ impl ProgressWriter {
     }
 }
 
-fn run_progress_writer(mut stream: UnixStream, shared: Arc<ProgressWriterShared>) {
+fn run_progress_writer(stream: UnixStream, shared: Arc<ProgressWriterShared>) {
     while let Some(frame) = next_progress_writer_frame(&shared) {
         let is_terminal = matches!(frame, ProgressWriterFrame::Terminal(_));
         let bytes = match frame {
             ProgressWriterFrame::Progress(bytes) | ProgressWriterFrame::Terminal(bytes) => bytes,
         };
 
-        match stream.write_all(&bytes) {
-            Ok(()) if is_terminal => return,
-            Ok(()) => {}
-            Err(error) if peer_disconnected_during_response(&error) => return,
-            Err(error) if progress_writer_timed_out(&error) => {
+        let write_result = if is_terminal {
+            write_terminal_frame(&stream, &bytes)
+        } else {
+            write_progress_frame(&stream, &bytes, shared.max_frame_bytes)
+        };
+
+        match write_result {
+            ProgressWriterWriteResult::Written if is_terminal => return,
+            ProgressWriterWriteResult::Written => {}
+            ProgressWriterWriteResult::Dropped => {
+                tracing::debug!(
+                    event = "agentd.manual_run_progress_dropped",
+                    "dropped manual run progress because the client socket is backpressured"
+                );
+            }
+            ProgressWriterWriteResult::PeerDisconnected => return,
+            ProgressWriterWriteResult::TimedOut => {
                 tracing::warn!(
                     event = "agentd.manual_run_progress_writer_timed_out",
-                    error = %error,
                     timeout_ms = PROGRESS_WRITE_TIMEOUT.as_millis(),
                     "manual run progress writer timed out and closed the client connection"
                 );
                 let _ = stream.shutdown(std::net::Shutdown::Both);
                 return;
             }
-            Err(error) => {
+            ProgressWriterWriteResult::Failed(error) => {
                 tracing::warn!(
                     event = "agentd.manual_run_progress_writer_failed",
                     error = %error,
@@ -1040,6 +1061,146 @@ fn run_progress_writer(mut stream: UnixStream, shared: Arc<ProgressWriterShared>
             }
         }
     }
+}
+
+fn configure_progress_writer_stream(stream: &UnixStream) -> Result<usize, io::Error> {
+    set_socket_send_buffer_bytes(stream, MAX_PROGRESS_FRAME_BYTES)?;
+    stream.set_write_timeout(Some(PROGRESS_WRITE_TIMEOUT))?;
+    let send_buffer_bytes = socket_send_buffer_bytes(stream)?;
+    let max_frame_bytes = std::cmp::min(MAX_PROGRESS_FRAME_BYTES, send_buffer_bytes / 2);
+    if max_frame_bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "progress writer socket send buffer is too small",
+        ));
+    }
+    Ok(max_frame_bytes)
+}
+
+fn write_progress_frame(
+    stream: &UnixStream,
+    bytes: &[u8],
+    max_frame_bytes: usize,
+) -> ProgressWriterWriteResult {
+    match socket_output_queue_bytes(stream) {
+        Ok(queued_bytes) if queued_bytes.saturating_add(bytes.len()) <= max_frame_bytes => {}
+        Ok(_) => return ProgressWriterWriteResult::Dropped,
+        Err(error) => return ProgressWriterWriteResult::Failed(error),
+    }
+
+    match send_complete_frame_nonblocking(stream, bytes) {
+        Ok(()) => ProgressWriterWriteResult::Written,
+        Err(error) if peer_disconnected_during_response(&error) => {
+            ProgressWriterWriteResult::PeerDisconnected
+        }
+        Err(error) if progress_writer_timed_out(&error) => ProgressWriterWriteResult::Dropped,
+        Err(error) => ProgressWriterWriteResult::Failed(error),
+    }
+}
+
+fn write_terminal_frame(stream: &UnixStream, bytes: &[u8]) -> ProgressWriterWriteResult {
+    let deadline = Instant::now() + PROGRESS_WRITE_TIMEOUT;
+    loop {
+        match socket_output_queue_bytes(stream) {
+            Ok(0) => match send_complete_frame_nonblocking(stream, bytes) {
+                Ok(()) => return ProgressWriterWriteResult::Written,
+                Err(error) if peer_disconnected_during_response(&error) => {
+                    return ProgressWriterWriteResult::PeerDisconnected;
+                }
+                Err(error) if progress_writer_timed_out(&error) => {}
+                Err(error) => return ProgressWriterWriteResult::Failed(error),
+            },
+            Ok(_) => {}
+            Err(error) => return ProgressWriterWriteResult::Failed(error),
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return ProgressWriterWriteResult::TimedOut;
+        }
+        thread::sleep(std::cmp::min(remaining, Duration::from_millis(1)));
+    }
+}
+
+fn send_complete_frame_nonblocking(stream: &UnixStream, bytes: &[u8]) -> Result<(), io::Error> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    let written = unsafe {
+        libc::send(
+            stream.as_raw_fd(),
+            bytes.as_ptr() as *const libc::c_void,
+            bytes.len(),
+            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+        )
+    };
+    if written < 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let written = usize::try_from(written)
+        .map_err(|_| io::Error::other("progress writer returned a negative byte count"))?;
+    if written == bytes.len() {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::WriteZero,
+        format!(
+            "progress writer committed a partial frame ({written} of {} bytes)",
+            bytes.len()
+        ),
+    ))
+}
+
+fn set_socket_send_buffer_bytes(stream: &UnixStream, bytes: usize) -> Result<(), io::Error> {
+    let bytes: libc::c_int = bytes
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "send buffer too large"))?;
+    let result = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &bytes as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+fn socket_send_buffer_bytes(stream: &UnixStream) -> Result<usize, io::Error> {
+    let mut bytes: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            &mut bytes as *mut libc::c_int as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    usize::try_from(bytes)
+        .map_err(|_| io::Error::other("progress writer socket send buffer was negative"))
+}
+
+fn socket_output_queue_bytes(stream: &UnixStream) -> Result<usize, io::Error> {
+    let mut bytes: libc::c_int = 0;
+    let result = unsafe { libc::ioctl(stream.as_raw_fd(), libc::TIOCOUTQ, &mut bytes) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    usize::try_from(bytes)
+        .map_err(|_| io::Error::other("progress writer socket output queue was negative"))
 }
 
 fn next_progress_writer_frame(shared: &ProgressWriterShared) -> Option<ProgressWriterFrame> {
@@ -1303,8 +1464,10 @@ mod tests {
         RunnerError, SessionInvocation, SessionOutcome, SessionProgressObserver, SessionSpec,
         StartupReconciliationReport,
     };
+    use std::collections::VecDeque;
     use std::fs;
-    use std::io;
+    use std::io::{self, Read};
+    use std::os::fd::AsRawFd;
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::Arc;
@@ -1317,6 +1480,45 @@ mod tests {
         os::unix::fs::FileTypeExt,
         os::unix::net::{UnixListener, UnixStream},
     };
+
+    fn progress_frame_with_total_len(total_len: usize) -> Vec<u8> {
+        let prefix =
+            br#"{"type":"progress","progress":{"stage":"transcript_event","session_id":"s","line":""#;
+        let suffix = br#""}}"#;
+        assert!(
+            total_len > prefix.len() + suffix.len() + 1,
+            "test frame length should leave room for content"
+        );
+        let content_len = total_len - prefix.len() - suffix.len() - 1;
+        let mut frame = Vec::with_capacity(total_len);
+        frame.extend_from_slice(prefix);
+        frame.extend(std::iter::repeat_n(b'x', content_len));
+        frame.extend_from_slice(suffix);
+        frame.push(b'\n');
+        assert_eq!(frame.len(), total_len);
+        frame
+    }
+
+    fn set_test_send_buffer(stream: &UnixStream, bytes: usize) {
+        let bytes: libc::c_int = bytes
+            .try_into()
+            .expect("test send buffer size should fit c_int");
+        let result = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &bytes as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "test should configure socket send buffer: {}",
+            io::Error::last_os_error()
+        );
+    }
 
     #[test]
     fn response_message_deserializes_blocked_outcome_payloads() {
@@ -1465,6 +1667,59 @@ source = "AGENTD_GITHUB_TOKEN"
             result.is_ok(),
             "closed peer during response write should be treated as normal completion"
         );
+    }
+
+    #[test]
+    fn progress_writer_drops_backpressured_progress_without_truncated_jsonl() {
+        let (writer_stream, mut reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        set_test_send_buffer(&writer_stream, 8192);
+        writer_stream
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .expect("test writer timeout should be configured");
+
+        let frame = progress_frame_with_total_len(8192);
+        let frame_len = frame.len();
+        let shared = Arc::new(super::ProgressWriterShared {
+            state: std::sync::Mutex::new(super::ProgressWriterState {
+                progress: VecDeque::from([
+                    super::QueuedProgressFrame {
+                        bytes: frame.clone(),
+                        deliver_before_terminal: false,
+                    },
+                    super::QueuedProgressFrame {
+                        bytes: frame,
+                        deliver_before_terminal: false,
+                    },
+                ]),
+                terminal: None,
+                closed: true,
+            }),
+            available: std::sync::Condvar::new(),
+            max_frame_bytes: frame_len,
+        });
+
+        let writer = thread::spawn(move || super::run_progress_writer(writer_stream, shared));
+        writer
+            .join()
+            .expect("progress writer should not panic under backpressure");
+
+        let mut response = Vec::new();
+        reader_stream
+            .read_to_end(&mut response)
+            .expect("reader should drain daemon output");
+        assert!(
+            response.is_empty() || response.ends_with(b"\n"),
+            "daemon must not leave a partial JSONL frame on the wire"
+        );
+
+        for line in response.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            serde_json::from_slice::<serde_json::Value>(line)
+                .expect("daemon should emit only complete JSON progress frames");
+        }
     }
 
     #[test]
