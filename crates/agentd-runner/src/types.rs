@@ -139,7 +139,7 @@ pub struct SessionInvocation {
 /// Non-terminal progress observed while a session is executing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionProgressEvent {
-    /// One complete line from `agentd/transcript/events.jsonl`.
+    /// One complete line from a runa nested transcript `events.jsonl`.
     TranscriptEvent { session_id: String, line: String },
 }
 
