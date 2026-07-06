@@ -473,12 +473,14 @@ fn binary_wish_help_shows_evocative_intent_prompting_surface() {
         "wish help should advertise socket override: {stdout}"
     );
     assert!(
-        stdout.contains("What do you wish the agent to do?"),
-        "wish help should document the statement prompt: {stdout}"
+        stdout.contains("Elicit a wish and seed one governed session."),
+        "wish help should describe the wish session boundary exactly: {stdout}"
     );
     assert!(
-        stdout.contains("What is this wish aimed at?"),
-        "wish help should document the optional target prompt: {stdout}"
+        stdout.contains(
+            "Prompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
+        ),
+        "wish help should document the exact prompt block: {stdout}"
     );
 }
 
@@ -916,15 +918,15 @@ fn binary_wish_command_prompts_and_forwards_prose_as_intent_text() {
 
     let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
     assert!(
-        stdout.contains("Speak your wish."),
+        stdout.contains("Speak a wish: the state you want made true."),
         "wish should greet the operator before prompting: {stdout}"
     );
     assert!(
-        stdout.contains("What do you wish the agent to do?"),
+        stdout.contains("What do you wish to be true?"),
         "wish should elicit an intent statement: {stdout}"
     );
     assert!(
-        stdout.contains("What is this wish aimed at?"),
+        stdout.contains("What is this wish aimed at? Leave blank if it has no target."),
         "wish should elicit an optional target: {stdout}"
     );
 
@@ -992,6 +994,20 @@ fn binary_wish_command_forwards_target_bearing_intent_text_verbatim() {
         output.status.success(),
         "wish command should succeed with target-bearing input: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.contains("Speak a wish: the state you want made true."),
+        "wish should greet the operator before prompting: {stdout}"
+    );
+    assert!(
+        stdout.contains("What do you wish to be true?"),
+        "wish should elicit an intent statement: {stdout}"
+    );
+    assert!(
+        stdout.contains("What is this wish aimed at? Leave blank if it has no target."),
+        "wish should elicit an optional target: {stdout}"
     );
 
     let invocation = invocations.lock().expect("invocations should lock")[0].clone();
