@@ -1100,25 +1100,54 @@ fn write_progress_frame(
 
 fn write_terminal_frame(stream: &UnixStream, bytes: &[u8]) -> ProgressWriterWriteResult {
     let deadline = Instant::now() + PROGRESS_WRITE_TIMEOUT;
+    let mut offset = 0;
     loop {
-        match socket_output_queue_bytes(stream) {
-            Ok(0) => match send_complete_frame_nonblocking(stream, bytes) {
-                Ok(()) => return ProgressWriterWriteResult::Written,
-                Err(error) if peer_disconnected_during_response(&error) => {
-                    return ProgressWriterWriteResult::PeerDisconnected;
+        if offset == bytes.len() {
+            return ProgressWriterWriteResult::Written;
+        }
+
+        if offset == 0 {
+            match socket_output_queue_bytes(stream) {
+                Ok(0) => {}
+                Ok(_) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return ProgressWriterWriteResult::TimedOut;
+                    }
+                    thread::sleep(std::cmp::min(remaining, Duration::from_millis(1)));
+                    continue;
                 }
-                Err(error) if progress_writer_timed_out(&error) => {}
                 Err(error) => return ProgressWriterWriteResult::Failed(error),
-            },
-            Ok(_) => {}
+            }
+        }
+
+        match send_frame_chunk_nonblocking(stream, &bytes[offset..]) {
+            Ok(0) => {
+                return ProgressWriterWriteResult::Failed(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "progress writer wrote zero bytes for a terminal frame",
+                ));
+            }
+            Ok(written) => {
+                offset += written;
+                continue;
+            }
+            Err(error) if peer_disconnected_during_response(&error) => {
+                return ProgressWriterWriteResult::PeerDisconnected;
+            }
+            Err(error) if progress_writer_timed_out(&error) => {}
             Err(error) => return ProgressWriterWriteResult::Failed(error),
         }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return ProgressWriterWriteResult::TimedOut;
+        if offset == 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return ProgressWriterWriteResult::TimedOut;
+            }
+            thread::sleep(std::cmp::min(remaining, Duration::from_millis(1)));
+        } else {
+            thread::sleep(Duration::from_millis(1));
         }
-        thread::sleep(std::cmp::min(remaining, Duration::from_millis(1)));
     }
 }
 
@@ -1127,6 +1156,21 @@ fn send_complete_frame_nonblocking(stream: &UnixStream, bytes: &[u8]) -> Result<
         return Ok(());
     }
 
+    let written = send_frame_chunk_nonblocking(stream, bytes)?;
+    if written == bytes.len() {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::WriteZero,
+        format!(
+            "progress writer committed a partial frame ({written} of {} bytes)",
+            bytes.len()
+        ),
+    ))
+}
+
+fn send_frame_chunk_nonblocking(stream: &UnixStream, bytes: &[u8]) -> Result<usize, io::Error> {
     let written = unsafe {
         libc::send(
             stream.as_raw_fd(),
@@ -1139,19 +1183,8 @@ fn send_complete_frame_nonblocking(stream: &UnixStream, bytes: &[u8]) -> Result<
         return Err(io::Error::last_os_error());
     }
 
-    let written = usize::try_from(written)
-        .map_err(|_| io::Error::other("progress writer returned a negative byte count"))?;
-    if written == bytes.len() {
-        return Ok(());
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::WriteZero,
-        format!(
-            "progress writer committed a partial frame ({written} of {} bytes)",
-            bytes.len()
-        ),
-    ))
+    usize::try_from(written)
+        .map_err(|_| io::Error::other("progress writer returned a negative byte count"))
 }
 
 fn set_socket_send_buffer_bytes(stream: &UnixStream, bytes: usize) -> Result<(), io::Error> {
@@ -1499,6 +1532,31 @@ mod tests {
         frame
     }
 
+    fn terminal_error_frame_with_total_len(total_len: usize) -> Vec<u8> {
+        let prefix = br#"{"type":"error","message":""#;
+        let suffix = br#""}"#;
+        assert!(
+            total_len > prefix.len() + suffix.len() + 1,
+            "test frame length should leave room for content"
+        );
+        let content_len = total_len - prefix.len() - suffix.len() - 1;
+        let mut frame = Vec::with_capacity(total_len);
+        frame.extend_from_slice(prefix);
+        frame.extend(std::iter::repeat_n(b'x', content_len));
+        frame.extend_from_slice(suffix);
+        frame.push(b'\n');
+        assert_eq!(frame.len(), total_len);
+        frame
+    }
+
+    fn read_socket_to_end(mut stream: UnixStream) -> Vec<u8> {
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("reader should drain daemon output");
+        response
+    }
+
     fn set_test_send_buffer(stream: &UnixStream, bytes: usize) {
         let bytes: libc::c_int = bytes
             .try_into()
@@ -1517,6 +1575,195 @@ mod tests {
             0,
             "test should configure socket send buffer: {}",
             io::Error::last_os_error()
+        );
+    }
+
+    #[test]
+    fn progress_writer_writes_fit_progress_frame_when_socket_has_room() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        set_test_send_buffer(&writer_stream, 8192);
+
+        let frame = progress_frame_with_total_len(1024);
+        let result = super::write_progress_frame(&writer_stream, &frame, 4096);
+        writer_stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("writer should close write half");
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::Written),
+            "fit progress frame should be written"
+        );
+        assert_eq!(read_socket_to_end(reader_stream), frame);
+    }
+
+    #[test]
+    fn progress_writer_drops_over_budget_progress_frame_without_writing_bytes() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+
+        let frame = progress_frame_with_total_len(4096);
+        let result = super::write_progress_frame(&writer_stream, &frame, 1024);
+        writer_stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("writer should close write half");
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::Dropped),
+            "over-budget progress frame should be dropped"
+        );
+        assert!(
+            read_socket_to_end(reader_stream).is_empty(),
+            "over-budget progress must not commit a partial frame"
+        );
+    }
+
+    #[test]
+    fn progress_writer_drops_backpressured_progress_frame_without_writing_bytes() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        set_test_send_buffer(&writer_stream, 4096);
+
+        let seed = progress_frame_with_total_len(4096);
+        let seed_result = super::write_progress_frame(&writer_stream, &seed, seed.len());
+        assert!(
+            matches!(seed_result, super::ProgressWriterWriteResult::Written),
+            "seed frame should fill some of the socket queue"
+        );
+
+        let frame = progress_frame_with_total_len(1024);
+        let result = super::write_progress_frame(&writer_stream, &frame, seed.len());
+        writer_stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("writer should close write half");
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::Dropped),
+            "backpressured progress frame should be dropped"
+        );
+        assert_eq!(
+            read_socket_to_end(reader_stream),
+            seed,
+            "backpressured progress must not commit a partial second frame"
+        );
+    }
+
+    #[test]
+    fn terminal_writer_writes_small_frame_whole() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+
+        let frame = terminal_error_frame_with_total_len(1024);
+        let result = super::write_terminal_frame(&writer_stream, &frame);
+        writer_stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("writer should close write half");
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::Written),
+            "small terminal frame should be written"
+        );
+        let response = read_socket_to_end(reader_stream);
+        assert_eq!(response, frame);
+        serde_json::from_slice::<serde_json::Value>(
+            response
+                .strip_suffix(b"\n")
+                .expect("terminal frame should be JSONL"),
+        )
+        .expect("terminal frame should be complete JSON");
+    }
+
+    #[test]
+    fn terminal_writer_writes_large_frame_to_completion() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        set_test_send_buffer(&writer_stream, 4096);
+        let send_buffer_bytes = super::socket_send_buffer_bytes(&writer_stream)
+            .expect("send buffer should be readable");
+        let frame = terminal_error_frame_with_total_len(send_buffer_bytes * 4);
+        let expected = frame.clone();
+
+        let reader = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            read_socket_to_end(reader_stream)
+        });
+
+        let result = super::write_terminal_frame(&writer_stream, &frame);
+        writer_stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("writer should close write half");
+        let response = reader.join().expect("reader should join cleanly");
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::Written),
+            "large terminal frame should be written to completion"
+        );
+        assert_eq!(
+            response, expected,
+            "large terminal frame must arrive whole, not truncated"
+        );
+        serde_json::from_slice::<serde_json::Value>(
+            response
+                .strip_suffix(b"\n")
+                .expect("terminal frame should be JSONL"),
+        )
+        .expect("large terminal frame should be complete JSON");
+    }
+
+    #[test]
+    fn progress_writer_handles_peer_disconnect_without_panic() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        drop(reader_stream);
+
+        let frame = progress_frame_with_total_len(1024);
+        let result = super::write_progress_frame(&writer_stream, &frame, frame.len());
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::PeerDisconnected),
+            "progress writer should recognize a disconnected peer"
+        );
+    }
+
+    #[test]
+    fn terminal_writer_handles_peer_disconnect_without_panic() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        drop(reader_stream);
+
+        let frame = terminal_error_frame_with_total_len(1024);
+        let result = super::write_terminal_frame(&writer_stream, &frame);
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::PeerDisconnected),
+            "terminal writer should recognize a disconnected peer"
+        );
+    }
+
+    #[test]
+    fn terminal_writer_handles_peer_disconnect_after_partial_write() {
+        let (writer_stream, mut reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        set_test_send_buffer(&writer_stream, 4096);
+        let send_buffer_bytes = super::socket_send_buffer_bytes(&writer_stream)
+            .expect("send buffer should be readable");
+        let frame = terminal_error_frame_with_total_len(send_buffer_bytes * 16);
+
+        let reader = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            let mut buffer = [0_u8; 1024];
+            reader_stream
+                .read(&mut buffer)
+                .expect("reader should receive the committed prefix")
+        });
+
+        let result = super::write_terminal_frame(&writer_stream, &frame);
+        let bytes_read = reader.join().expect("reader should join cleanly");
+
+        assert!(bytes_read > 0, "reader should receive a terminal prefix");
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::PeerDisconnected),
+            "terminal writer should stop cleanly when the peer disconnects mid-frame"
         );
     }
 
