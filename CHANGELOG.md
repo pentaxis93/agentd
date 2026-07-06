@@ -53,7 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `agentd run` now supports work-mode invocation from a matching supplied
   `work-unit` artifact, using `--work-unit <ID> --artifact-type work-unit
   --artifact-file <ID>.json`.
-- `agentd wish` starts an intent-seeded session through an evocative
+- `agentd wish` starts an intent-seeded session through a desired-state
   operator prompt, collecting the statement and optional target before reusing
   the existing canonical intent intake.
 
@@ -64,6 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   socket `IntentText` variant, and `.runa/workspace/intent/operator-input.json`
   materialization. The generic `--artifact-file` path remains a full-document
   intake for any declared artifact type.
+
+- `agentd wish` now frames its greeting, statement prompt, optional target
+  prompt, help text, and wish-input errors around the desired state the operator
+  wants made true.
 
 - README hero rewritten for the ecosystem README pass: positions agentd as
   the daemon for running autonomous agents like production workloads, with

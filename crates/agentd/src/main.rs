@@ -15,9 +15,10 @@ use clap::{Args, Parser, Subcommand};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
-const WISH_GREETING: &str = "Speak your wish.";
-const WISH_STATEMENT_PROMPT: &str = "What do you wish the agent to do?";
-const WISH_TARGET_PROMPT: &str = "What is this wish aimed at? Leave blank for prose only.";
+const WISH_GREETING: &str = "Speak a wish: the state you want made true.";
+const WISH_STATEMENT_PROMPT: &str = "What do you wish to be true?";
+const WISH_TARGET_PROMPT: &str = "What is this wish aimed at? Leave blank if it has no target.";
+const WISH_ABOUT: &str = "Elicit a wish and seed one governed session.";
 
 #[derive(Debug)]
 enum RunCommandError {
@@ -86,7 +87,7 @@ impl fmt::Display for RunCommandError {
                 )
             }
             Self::EmptyWishStatement => {
-                write!(f, "wish statement must not be empty")
+                write!(f, "wish statement must name a desired state")
             }
         }
     }
@@ -132,10 +133,10 @@ enum Command {
         #[arg(long, requires = "artifact_file")]
         artifact_type: Option<String>,
     },
-    /// Greet the operator, elicit intent, and seed a session.
     #[command(
         display_name = "agentd",
-        after_help = "Prompts:\n  Speak your wish.\n  What do you wish the agent to do?\n  What is this wish aimed at? Leave blank for prose only."
+        about = WISH_ABOUT,
+        after_help = wish_after_help()
     )]
     Wish {
         agent: String,
@@ -158,6 +159,10 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn wish_after_help() -> String {
+    format!("Prompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}")
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -334,7 +339,7 @@ fn prompt_line<R: BufRead, W: Write>(
     if bytes_read == 0 {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
-            "wish prompt reached end of input",
+            "wish input ended before the wish was complete",
         )));
     }
 

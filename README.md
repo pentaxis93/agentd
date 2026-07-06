@@ -46,8 +46,8 @@ Manual operator sessions flow through `agentd wish` or `agentd run`, and
 scheduled runs dispatch through the same daemon socket intake without
 introducing a separate job type.
 Operators may also start an intent-seeded session with `agentd wish`, which
-prompts for the intent statement and optional target before dispatching through
-that same socket intake. Manual runs may carry per-invocation work input
+prompts for the desired-state statement and optional target before dispatching
+through that same socket intake. Manual runs may carry per-invocation work input
 without modifying the agent: intent text can be synthesized into a canonical
 intent artifact, and complete JSON artifacts can be placed directly into the
 session workspace when the active methodology declares the relevant artifact
@@ -286,10 +286,12 @@ For operator intent, use `wish`:
 agentd wish site-builder
 ```
 
-`wish` greets the operator and prompts for the statement and optional target.
-When the target prompt is left blank, agentd authors `{statement, source}`.
-When a target is supplied, agentd authors `{statement, target, source}` and
-passes the target through unchanged for the runtime to interpret.
+`wish` greets the operator with `Speak a wish: the state you want made true.`,
+asks `What do you wish to be true?`, and then offers the optional target prompt
+`What is this wish aimed at? Leave blank if it has no target.` When the target
+prompt is left blank, agentd authors `{statement, source}`. When a target is
+supplied, agentd authors `{statement, target, source}` and passes the target
+through unchanged for the runtime to interpret.
 
 Manual invocation also supports lower-level intake-mode and work-mode
 surfaces:
