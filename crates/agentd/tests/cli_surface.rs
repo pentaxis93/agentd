@@ -492,7 +492,7 @@ fn binary_wish_help_shows_evocative_intent_prompting_surface() {
     );
     assert!(
         stdout.contains(
-            "Live observation:\n  agentd wish streams concise session progress by default. Use --progress full for every available progress field.\n\nPrompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
+            "Live observation:\n  agentd wish streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nPrompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
         ),
         "wish help should document the exact prompt block: {stdout}"
     );
