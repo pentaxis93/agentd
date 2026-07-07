@@ -1099,7 +1099,15 @@ fn write_progress_frame(
 }
 
 fn write_terminal_frame(stream: &UnixStream, bytes: &[u8]) -> ProgressWriterWriteResult {
-    let deadline = Instant::now() + PROGRESS_WRITE_TIMEOUT;
+    write_terminal_frame_with_timeout(stream, bytes, PROGRESS_WRITE_TIMEOUT)
+}
+
+fn write_terminal_frame_with_timeout(
+    stream: &UnixStream,
+    bytes: &[u8],
+    timeout: Duration,
+) -> ProgressWriterWriteResult {
+    let deadline = Instant::now() + timeout;
     let mut offset = 0;
     loop {
         if offset == bytes.len() {
@@ -1139,15 +1147,11 @@ fn write_terminal_frame(stream: &UnixStream, bytes: &[u8]) -> ProgressWriterWrit
             Err(error) => return ProgressWriterWriteResult::Failed(error),
         }
 
-        if offset == 0 {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return ProgressWriterWriteResult::TimedOut;
-            }
-            thread::sleep(std::cmp::min(remaining, Duration::from_millis(1)));
-        } else {
-            thread::sleep(Duration::from_millis(1));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return ProgressWriterWriteResult::TimedOut;
         }
+        thread::sleep(std::cmp::min(remaining, Duration::from_millis(1)));
     }
 }
 
@@ -1708,6 +1712,57 @@ mod tests {
                 .expect("terminal frame should be JSONL"),
         )
         .expect("large terminal frame should be complete JSON");
+    }
+
+    #[test]
+    fn terminal_writer_times_out_after_partial_write_to_stalled_peer() {
+        let (writer_stream, reader_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        set_test_send_buffer(&writer_stream, 4096);
+        let send_buffer_bytes = super::socket_send_buffer_bytes(&writer_stream)
+            .expect("send buffer should be readable");
+        let frame = terminal_error_frame_with_total_len(send_buffer_bytes * 64);
+        let frame_len = frame.len();
+        let timeout = Duration::from_millis(50);
+        let (result_tx, result_rx) = mpsc::channel();
+
+        let writer = thread::spawn(move || {
+            let started = Instant::now();
+            let result = super::write_terminal_frame_with_timeout(&writer_stream, &frame, timeout);
+            result_tx
+                .send((result, started.elapsed()))
+                .expect("writer result should be delivered");
+        });
+
+        let (result, elapsed) = match result_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(reader_stream);
+                writer
+                    .join()
+                    .expect("writer should stop when the stalled peer disconnects");
+                panic!("partial terminal write should return by deadline: {error}");
+            }
+        };
+        writer.join().expect("writer should join cleanly");
+
+        assert!(
+            matches!(result, super::ProgressWriterWriteResult::TimedOut),
+            "partial terminal write to a stalled peer should time out"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "partial terminal write should return promptly after its deadline"
+        );
+        let response = read_socket_to_end(reader_stream);
+        assert!(
+            !response.is_empty(),
+            "test should exercise the partial-send path after committing a prefix"
+        );
+        assert!(
+            response.len() < frame_len,
+            "stalled peer should receive only a partial terminal frame"
+        );
     }
 
     #[test]
