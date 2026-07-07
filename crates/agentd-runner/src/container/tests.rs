@@ -297,7 +297,7 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
 }
 
 #[test]
-fn container_script_exports_session_stable_transcript_run_id_for_multistage_runa_events() {
+fn container_script_exports_agentd_owned_transcript_identity_for_runa() {
     let spec = SessionSpec {
         forge_type: "github".to_string(),
         ..test_session_spec()
@@ -309,21 +309,11 @@ fn container_script_exports_session_stable_transcript_run_id_for_multistage_runa
         input: None,
         timeout: None,
     };
-    let root = unique_test_dir("agentd-runner-transcript-run-id");
-    let audit_record = SessionAuditRecord {
-        record_dir: root.join("site-builder/0123456789abcdef"),
-        runa_dir: root.join("site-builder/0123456789abcdef/runa"),
-        transcript_dir: root.join("site-builder/0123456789abcdef/agentd/transcript"),
-        metadata_path: root.join("site-builder/0123456789abcdef/agentd/session.json"),
-        ..test_audit_record()
-    };
-    fs::create_dir_all(&audit_record.transcript_dir)
-        .expect("test transcript directory should be created");
     let resources = SessionResources {
         container_name: "agentd-agent-session".to_string(),
         methodology_staging_dir: PathBuf::from("/tmp/staging"),
         methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
-        audit_record,
+        audit_record: test_audit_record(),
         audit_mount: PreparedBindMount {
             source: PathBuf::from("/tmp/staging/audit-runa"),
             target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
@@ -370,74 +360,6 @@ fn container_script_exports_session_stable_transcript_run_id_for_multistage_runa
         script.contains("export RUNA_TRANSCRIPT_DIR='/agentd/transcript'"),
         "container script should still export transcript root:\n{script}"
     );
-
-    write_runa_style_transcript_event(
-        &resources.audit_record.transcript_dir,
-        identity.deployment(),
-        "_unscoped",
-        "run-1783430832991738225-1",
-        "{\"schema_version\":2,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"lost first stage\"}\n",
-    );
-    write_runa_style_transcript_event(
-        &resources.audit_record.transcript_dir,
-        identity.deployment(),
-        "issue-162",
-        "run-1783431017466125708-1",
-        "{\"schema_version\":2,\"source\":\"runa-mcp\",\"kind\":\"tool_call\",\"content\":\"lost second stage\"}\n",
-    );
-
-    crate::audit::finalize_session_transcript(&resources.audit_record)
-        .expect("stage-varying run ids should finalize as an empty addressed stream");
-    let manifest = read_transcript_manifest(&resources.audit_record);
-    assert_eq!(
-        manifest["coverage"], "no_events",
-        "stage-varying runa-minted run ids must not satisfy agentd's single-run contract"
-    );
-    assert_eq!(manifest["event_schema_versions"], serde_json::json!([]));
-    assert!(
-        !fs::read_to_string(resources.audit_record.transcript_dir.join("transcript.md"))
-            .expect("transcript markdown should exist")
-            .contains("lost"),
-        "agentd must not recover missing run identity by scanning arbitrary run subtrees"
-    );
-
-    let stable_record = SessionAuditRecord {
-        record_dir: root.join("site-builder/fedcba9876543210"),
-        runa_dir: root.join("site-builder/fedcba9876543210/runa"),
-        transcript_dir: root.join("site-builder/fedcba9876543210/agentd/transcript"),
-        metadata_path: root.join("site-builder/fedcba9876543210/agentd/session.json"),
-        session_id: "0123456789abcdef".to_string(),
-        transcript_identity: identity.clone(),
-        ..test_audit_record()
-    };
-    fs::create_dir_all(&stable_record.transcript_dir)
-        .expect("stable transcript directory should be created");
-    write_runa_style_transcript_event(
-        &stable_record.transcript_dir,
-        identity.deployment(),
-        "_unscoped",
-        identity.run_id(),
-        "{\"schema_version\":2,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"first stage\"}\n",
-    );
-    write_runa_style_transcript_event(
-        &stable_record.transcript_dir,
-        identity.deployment(),
-        "issue-162",
-        identity.run_id(),
-        "{\"schema_version\":2,\"source\":\"runa-mcp\",\"kind\":\"tool_call\",\"content\":\"second stage\"}\n",
-    );
-
-    crate::audit::finalize_session_transcript(&stable_record)
-        .expect("session-stable run id should finalize");
-    let manifest = read_transcript_manifest(&stable_record);
-    assert_eq!(manifest["coverage"], "full");
-    assert_eq!(manifest["event_schema_versions"], serde_json::json!([2]));
-    let markdown = fs::read_to_string(stable_record.transcript_dir.join("transcript.md"))
-        .expect("stable transcript markdown should exist");
-    assert!(markdown.contains("first stage"), "{markdown}");
-    assert!(markdown.contains("second stage"), "{markdown}");
-
-    fs::remove_dir_all(root).expect("temporary audit root should be removed");
 }
 
 #[test]
@@ -2006,38 +1928,6 @@ fn mount_src_value(mount: &str) -> Option<String> {
     mount
         .split(',')
         .find_map(|component| component.strip_prefix("src=").map(str::to_string))
-}
-
-fn write_runa_style_transcript_event(
-    transcript_dir: &Path,
-    deployment: &str,
-    work_unit_component: &str,
-    run_id: &str,
-    event: &str,
-) {
-    let events_path = transcript_dir
-        .join("deployments")
-        .join(deployment)
-        .join("work-units")
-        .join(work_unit_component)
-        .join("runs")
-        .join(run_id)
-        .join("events.jsonl");
-    fs::create_dir_all(
-        events_path
-            .parent()
-            .expect("event path should have a parent"),
-    )
-    .expect("runa-style transcript event directory should be created");
-    fs::write(events_path, event).expect("runa-style transcript event should be written");
-}
-
-fn read_transcript_manifest(record: &SessionAuditRecord) -> serde_json::Value {
-    serde_json::from_str(
-        &fs::read_to_string(record.transcript_dir.join("manifest.json"))
-            .expect("transcript manifest should exist"),
-    )
-    .expect("transcript manifest should be json")
 }
 
 fn unique_test_dir(prefix: &str) -> PathBuf {

@@ -426,6 +426,35 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
     .expect("transcript manifest should be valid json");
     assert_eq!(transcript_manifest["coverage"], "full");
 
+    let session_id = record_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("session record dir should be named by the session id");
+    let event_files = nested_transcript_event_files(&record_dir.join("agentd/transcript"));
+    assert_eq!(
+        event_files.len(),
+        1,
+        "multi-stage runa events should share one agentd-owned run segment: {event_files:?}"
+    );
+    let event_path = event_files
+        .first()
+        .expect("full transcript coverage should have an event file");
+    let path_components = event_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let run_component_index = path_components
+        .iter()
+        .position(|component| component == "runs")
+        .expect("nested transcript event path should include runs component")
+        + 1;
+    assert_eq!(
+        path_components.get(run_component_index),
+        Some(&session_id.to_string()),
+        "runa must honor agentd's session-stable RUNA_TRANSCRIPT_RUN_ID: {}",
+        event_path.display()
+    );
+
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
 }
@@ -2476,17 +2505,23 @@ set -eu
 
 transcript_events_file() {
     work_unit_component="${1:-_unscoped}"
+    stage_component="${2:-stage}"
+    if [ -n "${RUNA_TRANSCRIPT_RUN_ID:-}" ]; then
+        run_id="${RUNA_TRANSCRIPT_RUN_ID}"
+    else
+        run_id="run-${stage_component}-1"
+    fi
     printf '%s/deployments/%s/work-units/%s/runs/%s/events.jsonl' \
         "${RUNA_TRANSCRIPT_DIR:?}" \
         "${RUNA_TRANSCRIPT_DEPLOYMENT:?}" \
         "$work_unit_component" \
-        "${RUNA_TRANSCRIPT_RUN_ID:?}"
+        "$run_id"
 }
 
 append_transcript_event() {
-    event_file="$(transcript_events_file "$1")"
+    event_file="$(transcript_events_file "$1" "$2")"
     mkdir -p "$(dirname "$event_file")"
-    printf '%s\n' "$2" >> "$event_file"
+    printf '%s\n' "$3" >> "$event_file"
 }
 
 subcommand="${1:-}"
@@ -2547,8 +2582,8 @@ EOF
                         printf 'run --agent-command -- %s\n' "$*" >> .runa/calls.log
                     fi
                     if [ -n "${RUNA_TRANSCRIPT_DIR:-}" ]; then
-                        append_transcript_event "$work_unit" '{"schema_version":2,"source":"runa","kind":"agent_input","content":"stub prompt"}'
-                        append_transcript_event "$work_unit" '{"schema_version":2,"source":"runa","kind":"agent_exit","success":true}'
+                        append_transcript_event "$work_unit" "specify" '{"schema_version":2,"source":"runa","kind":"agent_input","content":"stub prompt"}'
+                        append_transcript_event "$work_unit" "land" '{"schema_version":2,"source":"runa","kind":"agent_exit","success":true}'
                     fi
                     exec "$@"
                     ;;
@@ -2694,11 +2729,16 @@ set -eu
 
 transcript_events_file() {
     work_unit_component="${AGENTD_WORK_UNIT:-_unscoped}"
+    if [ -n "${RUNA_TRANSCRIPT_RUN_ID:-}" ]; then
+        run_id="${RUNA_TRANSCRIPT_RUN_ID}"
+    else
+        run_id="run-agent-command-1"
+    fi
     printf '%s/deployments/%s/work-units/%s/runs/%s/events.jsonl' \
         "${RUNA_TRANSCRIPT_DIR:?}" \
         "${RUNA_TRANSCRIPT_DEPLOYMENT:?}" \
         "$work_unit_component" \
-        "${RUNA_TRANSCRIPT_RUN_ID:?}"
+        "$run_id"
 }
 
 append_transcript_event() {
