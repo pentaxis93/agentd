@@ -344,21 +344,24 @@ fn container_script_exports_agentd_owned_transcript_identity_for_runa() {
 
     assert!(
         script.contains(&format!(
-            "export RUNA_TRANSCRIPT_DEPLOYMENT='{}'",
+            "RUNA_TRANSCRIPT_DEPLOYMENT='{}'",
             identity.deployment()
         )),
-        "container script should export agentd-owned deployment identity:\n{script}"
+        "container script should pass agentd-owned deployment identity at the gosu boundary:\n{script}"
     );
     assert!(
-        script.contains(&format!(
-            "export RUNA_TRANSCRIPT_RUN_ID='{}'",
-            identity.run_id()
-        )),
-        "container script should export agentd-owned run id:\n{script}"
+        script.contains(&format!("RUNA_TRANSCRIPT_RUN_ID='{}'", identity.run_id())),
+        "container script should pass agentd-owned run id at the gosu boundary:\n{script}"
     );
     assert!(
-        script.contains("export RUNA_TRANSCRIPT_DIR='/agentd/transcript'"),
-        "container script should still export transcript root:\n{script}"
+        script.contains("env RUNA_TRANSCRIPT_DIR='/agentd/transcript'"),
+        "container script should pass transcript root after gosu:\n{script}"
+    );
+    assert!(
+        script.contains(
+            "exec gosu 'site-builder:site-builder' env RUNA_TRANSCRIPT_DIR='/agentd/transcript'"
+        ),
+        "final runa run process should receive transcript env through post-gosu env:\n{script}"
     );
 }
 
@@ -526,7 +529,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
     assert!(!script.contains("\nchown -R 'myagent:myagent' '/home/myagent'\n"));
     assert!(script.contains("\nexport HOME='/home/myagent'\n"));
     assert!(script.contains(
-        "\ngosu 'myagent:myagent' runa init --methodology '/agentd/methodology/manifest.toml'\n"
+        "\ngosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa init --methodology '/agentd/methodology/manifest.toml'\n"
     ));
     assert!(!script.contains(".runa/config.toml"));
     assert!(script.contains(
@@ -539,7 +542,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
     );
     assert!(
         script.contains(
-            "\nexec gosu 'myagent:myagent' runa run --agent-command -- 'site-builder' 'exec' '--sandbox' 'workspace-write'"
+            "\nexec gosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa run --agent-command -- 'site-builder' 'exec' '--sandbox' 'workspace-write'"
         ),
         "work-unit reference should enter runa's resolving path instead of --work-unit: {script}"
     );
@@ -572,11 +575,7 @@ fn build_container_script_uses_mode_based_audit_mount_writability_without_chown(
             "\nln -s '/home/myagent/.agentd/audit/runa' '/home/myagent/repo/.runa'\n\
              export HOME='/home/myagent'\n\
              unset AGENTD_WORK_UNIT\n\
-             export RUNA_TRANSCRIPT_DIR='/agentd/transcript'\n\
-             export RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6'\n\
-             export RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef'\n\
-             export RUNA_TRANSCRIPT_REDACT_ENV=''\n\
-             gosu 'myagent:myagent' runa init"
+             gosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa init"
         ),
         "audit mount root should rely on host-side mode setup before runa init: {script}"
     );
@@ -789,7 +788,7 @@ fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
     assert!(script.contains("\nexport HOME='/home/myagent'\n"));
     assert!(script.contains("\nunset AGENTD_WORK_UNIT\n"));
     assert!(script.contains(
-        "\nexec gosu 'myagent:myagent' runa run --agent-command -- 'site-builder' 'exec'"
+        "\nexec gosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa run --agent-command -- 'site-builder' 'exec'"
     ));
 }
 

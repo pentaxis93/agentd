@@ -1626,6 +1626,57 @@ mod tests {
     }
 
     #[test]
+    fn finalize_session_transcript_ignores_runa_minted_run_ids() {
+        let root = unique_test_dir("agentd-audit-minted-run-id-transcript");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "agentd-owned-run-id",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let exact_events_path = crate::transcript::TranscriptEventSource::from_record(&record)
+            .event_file_path_for_work_unit("survey");
+        let runs_dir = exact_events_path
+            .parent()
+            .and_then(Path::parent)
+            .expect("event path should have a runs directory");
+        let minted_events_path = runs_dir.join("run-minted-by-runa").join("events.jsonl");
+        fs::create_dir_all(minted_events_path.parent().expect("minted events parent"))
+            .expect("minted run event directory should be created");
+        fs::write(
+            &minted_events_path,
+            "{\"schema_version\":2,\"source\":\"runa-mcp\",\"kind\":\"tool_call\",\"content\":\"minted should not count\"}\n",
+        )
+        .expect("minted run events should be written");
+
+        super::finalize_session_transcript(&record).expect("transcript should finalize");
+
+        let markdown = fs::read_to_string(record.transcript_dir.join("transcript.md"))
+            .expect("transcript markdown should exist");
+        assert!(!markdown.contains("minted should not count"), "{markdown}");
+        assert!(
+            markdown.contains("No structured transcript events"),
+            "mismatched run ids should surface as missing identity delivery, not discovery success: {markdown}"
+        );
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("transcript manifest should exist"),
+        )
+        .expect("manifest should be json");
+        assert_eq!(manifest["coverage"], "no_events");
+        assert_eq!(manifest["event_schema_versions"], serde_json::json!([]));
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
     fn finalize_session_transcript_refuses_symlinked_nested_transcript_ancestors() {
         use std::os::unix::fs::symlink;
 

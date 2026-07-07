@@ -55,7 +55,7 @@ pub(crate) struct TranscriptEventSource {
     identity: TranscriptIdentity,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct TranscriptEventFile {
     path: PathBuf,
     work_unit_component: OsString,

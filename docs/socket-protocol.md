@@ -62,16 +62,17 @@ target prompt; `agentd run --intent` has no target flag.
 `{"type": "progress", "progress": {"stage": "...", ...}}` — non-terminal
 live progress for a run request. `dispatch_started` is a start marker;
 `transcript_event` carries execution-phase events from the running session's
-`agentd/transcript/events.jsonl` stream. `agentd wish` and `agentd run` render
-these frames in the invoking terminal while they wait for the terminal outcome;
-`--progress summary` prints concise event names and `--progress full` includes
-the raw transcript event line. Progress delivery is best-effort: oversized
-transcript records and progress frames that cannot fit without preserving room
-for the terminal response are dropped whole. The daemon never emits partial
-progress JSON frames, and the terminal `session_outcome` or terminal `error`
-remains the authoritative completion response. CLI rendering control-escapes
-untrusted request and transcript fields before they reach the operator's
-terminal.
+same nested runa event source that sealed audit finalization reads:
+`agentd/transcript/deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl`.
+`agentd wish` and `agentd run` render these frames in the invoking terminal
+while they wait for the terminal outcome; `--progress summary` prints concise
+event names and `--progress full` includes the raw transcript event line.
+Progress delivery is best-effort: oversized transcript records and progress
+frames that cannot fit without preserving room for the terminal response are
+dropped whole. The daemon never emits partial progress JSON frames, and the
+terminal `session_outcome` or terminal `error` remains the authoritative
+completion response. CLI rendering control-escapes untrusted request and
+transcript fields before they reach the operator's terminal.
 
 `{"type": "error", "message": "..."}` — the request was rejected before a
 session outcome existed (malformed request, unknown agent, dispatch

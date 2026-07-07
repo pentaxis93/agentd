@@ -165,12 +165,15 @@ default-repo resolution happen daemon-side after the socket request is
 received, so client and daemon responsibility boundaries stay clean.
 While a manual `agentd wish` or `agentd run` request is in flight, the daemon
 may send progress frames over that same client connection before the terminal
-session outcome. The runner tails the active transcript event stream it already
-owns under `agentd/transcript/events.jsonl`, and the daemon forwards those
-events to the launching client while the session executes. The CLI renders
-those frames according to the operator's selected progress level, so the
-launching terminal can observe the session without knowing container names,
-daemon log layout, or audit-record paths.
+session outcome. The runner observes the same exact-identity nested runa
+transcript event source later used for sealed audit finalization, under
+`agentd/transcript/deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl`.
+The resolver enumerates work units for the injected deployment and run id; it
+does not scan `runs/*` to recover runa-minted identities. The daemon forwards
+those events to the launching client while the session executes. The CLI
+renders those frames according to the operator's selected progress level, so
+the launching terminal can observe the session without knowing container
+names, daemon log layout, or audit-record paths.
 
 Operational visibility for that lifecycle uses structured tracing events written
 to stderr. The production default is timestamped JSON lines at `info` so

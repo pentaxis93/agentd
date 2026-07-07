@@ -79,12 +79,15 @@ the manifest never overstates what the transcript captured.
 `missing_mcp_events` means runa ran but the agent runtime never launched
 `runa-mcp`, so tool-call events were not observable.
 
-agentd sets `RUNA_TRANSCRIPT_DEPLOYMENT` and `RUNA_TRANSCRIPT_RUN_ID` before
-launching runa. It reads event files only below the matching nested deployment
+agentd passes `RUNA_TRANSCRIPT_DEPLOYMENT` and `RUNA_TRANSCRIPT_RUN_ID` through
+the post-`gosu` `runa run` process boundary. Live progress and sealed
+finalization both read event files only below the matching nested deployment
 and run id, while allowing multiple work-unit stage directories to appear
-during one session. Every nested directory component below the trusted
-`agentd/transcript` base is traversed without following symlinks, and unsafe
-symlinked ancestors are refused rather than read through.
+during one session. They enumerate work units, not arbitrary `runs/*`, so a
+runa-minted run id remains an identity-delivery failure rather than a
+successful discovery fallback. Every nested directory component below the
+trusted `agentd/transcript` base is traversed without following symlinks, and
+unsafe symlinked ancestors are refused rather than read through.
 
 ## Change policy
 

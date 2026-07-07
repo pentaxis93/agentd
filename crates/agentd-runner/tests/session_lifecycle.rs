@@ -430,6 +430,16 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
         .file_name()
         .and_then(|name| name.to_str())
         .expect("session record dir should be named by the session id");
+    let observed_transcript_env = fs::read_to_string(record_dir.join("runa/transcript-env.log"))
+        .expect("fake runa should record the post-gosu process transcript environment");
+    assert!(
+        observed_transcript_env.contains("deployment=agentd-"),
+        "runa run must observe agentd-owned deployment after gosu: {observed_transcript_env}"
+    );
+    assert!(
+        observed_transcript_env.contains(&format!("run_id={session_id}\n")),
+        "runa run must observe the agentd session id after gosu: {observed_transcript_env}"
+    );
     let event_files = nested_transcript_event_files(&record_dir.join("agentd/transcript"));
     assert_eq!(
         event_files.len(),
@@ -443,11 +453,28 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
         .components()
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
+    let deployment_component_index = path_components
+        .iter()
+        .position(|component| component == "deployments")
+        .expect("nested transcript event path should include deployments component")
+        + 1;
     let run_component_index = path_components
         .iter()
         .position(|component| component == "runs")
         .expect("nested transcript event path should include runs component")
         + 1;
+    let observed_deployment = observed_transcript_env
+        .lines()
+        .find_map(|line| line.strip_prefix("deployment="))
+        .expect("fake runa should record observed deployment");
+    assert_eq!(
+        path_components
+            .get(deployment_component_index)
+            .map(String::as_str),
+        Some(observed_deployment),
+        "runa events must land under the deployment observed by the post-gosu runa process: {}",
+        event_path.display()
+    );
     assert_eq!(
         path_components.get(run_component_index),
         Some(&session_id.to_string()),
@@ -2581,6 +2608,7 @@ EOF
                     else
                         printf 'run --agent-command -- %s\n' "$*" >> .runa/calls.log
                     fi
+                    printf 'deployment=%s\nrun_id=%s\n' "${RUNA_TRANSCRIPT_DEPLOYMENT:-}" "${RUNA_TRANSCRIPT_RUN_ID:-}" > .runa/transcript-env.log
                     if [ -n "${RUNA_TRANSCRIPT_DIR:-}" ]; then
                         append_transcript_event "$work_unit" "specify" '{"schema_version":2,"source":"runa","kind":"agent_input","content":"stub prompt"}'
                         append_transcript_event "$work_unit" "land" '{"schema_version":2,"source":"runa","kind":"agent_exit","success":true}'
