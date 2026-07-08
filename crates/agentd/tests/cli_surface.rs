@@ -1618,3 +1618,99 @@ argv = ["site-builder", "exec"]
         std::env::remove_var("XDG_RUNTIME_DIR");
     }
 }
+
+#[test]
+fn binary_wish_command_seeds_work_unit_arm_and_skips_prose_elicitation() {
+    let runtime_dir = std::env::temp_dir().join(format!(
+        "agentd-cli-runtime-wish-work-unit-arm-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&runtime_dir).expect("runtime dir should be created");
+    let socket_path = runtime_dir.join("agentd.sock");
+    let pid_file = runtime_dir.join("agentd.pid");
+    let config_path = write_temp_config(
+        "client-command-wish-work-unit-arm",
+        &daemon_test_config(&socket_path, &pid_file),
+    );
+    let (shutdown, handle, _config, invocations) =
+        start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
+
+    // stdin is closed: the work-unit arm must not block on or read prose.
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args([
+            "wish",
+            "--socket-path",
+            socket_path.to_str().expect("socket path should be utf-8"),
+            "site-builder",
+            "https://example.com/repo.git",
+            "--work-unit",
+            "issue-81",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("agentd binary should run");
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+
+    assert!(
+        output.status.success(),
+        "wish work-unit arm should succeed without prose input: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        !stdout.contains("Speak a wish: the state you want made true."),
+        "wish work-unit arm must not elicit prose, so a single invocation \
+         cannot carry both an intent and a work-unit: {stdout}"
+    );
+
+    let invocation = invocations.lock().expect("invocations should lock")[0].clone();
+    assert_eq!(
+        invocation.work_unit.as_deref(),
+        Some("issue-81"),
+        "wish work-unit arm should enter the reference as a work-unit"
+    );
+    assert_eq!(
+        invocation.input, None,
+        "wish work-unit arm should reach the same downstream shape as `run --work-unit`: \
+         a work-unit with no invocation input"
+    );
+}
+
+#[test]
+fn binary_wish_help_advertises_work_unit_arm() {
+    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["wish", "--help"])
+        .output()
+        .expect("agentd binary should run");
+
+    assert!(
+        output.status.success(),
+        "wish help should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+    assert!(
+        stdout.contains("--work-unit"),
+        "wish help should advertise the work-unit arm: {stdout}"
+    );
+    // The prose prompt surface remains documented unchanged.
+    assert!(
+        stdout.contains(
+            "Prompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
+        ),
+        "wish help should retain the exact prose prompt block: {stdout}"
+    );
+}
