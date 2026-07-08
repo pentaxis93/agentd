@@ -1404,25 +1404,182 @@ source = "AGENTD_GITHUB_TOKEN"
         );
     }
 
-    #[test]
-    fn summary_progress_escapes_untrusted_transcript_event_kind_controls() {
+    fn render_transcript_line(line: &str, level: LiveObservationLevel) -> String {
         let mut output = Vec::new();
 
         super::render_progress(
             ProgressMessage::TranscriptEvent {
                 session_id: "fake-session-1".to_string(),
-                line: "{\"kind\":\"agent_input\\nspoof\\u001b[2J\"}".to_string(),
+                line: line.to_string(),
             },
-            LiveObservationLevel::Summary,
+            level,
             &mut output,
         )
-        .expect("summary progress should render");
+        .expect("transcript progress should render");
 
-        let output = String::from_utf8(output).expect("summary progress should be utf8");
-        assert_eq!(output, "session event: agent_input\\nspoof\\u{1b}[2J\n");
+        String::from_utf8(output).expect("transcript progress should be utf8")
+    }
+
+    #[test]
+    fn summary_progress_renders_followable_transcript_activity() {
+        let cases = [
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"build the release checklist"}"#,
+                ["runa/agent_input", "build the release checklist"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_output","content":"reading repository state"}"#,
+                ["runa/agent_output", "reading repository state"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_stderr","message":"warning: retrying tool call"}"#,
+                ["runa/agent_stderr", "warning: retrying tool call"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","tool":"shell"}"#,
+                [
+                    "runa-mcp/tool_call",
+                    "protocol=mcp",
+                    "action=tools/call",
+                    "tool=shell",
+                ]
+                .as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_exit","success":true,"exit_code":0}"#,
+                ["runa/agent_exit", "success=true", "exit_code=0"].as_slice(),
+            ),
+        ];
+
+        for (line, expected_parts) in cases {
+            let output = render_transcript_line(line, LiveObservationLevel::Summary);
+            for expected in expected_parts {
+                assert!(
+                    output.contains(expected),
+                    "summary output should contain {expected:?}: {output:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_observation_level_renders_followable_transcript_content() {
+        let line = r#"{"schema_version":1,"source":"runa","kind":"agent_output","content":"useful live payload"}"#;
+
+        for level in [LiveObservationLevel::Summary, LiveObservationLevel::Full] {
+            let output = render_transcript_line(line, level);
+            assert!(
+                output.contains("useful live payload"),
+                "{level:?} output should include transcript payload: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_progress_includes_session_context_and_raw_transcript_detail() {
+        let output = render_transcript_line(
+            r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","success":true,"content":"inspect"}"#,
+            LiveObservationLevel::Full,
+        );
+
+        for expected in [
+            "session_id=fake-session-1",
+            r#""source":"runa-mcp""#,
+            r#""kind":"tool_call""#,
+            r#""protocol":"mcp""#,
+            r#""action":"tools/call""#,
+            r#""success":true"#,
+            r#""content":"inspect""#,
+        ] {
+            assert!(
+                output.contains(expected),
+                "full output should contain raw detail {expected:?}: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_fallbacks_remain_observable_at_every_level() {
+        let cases = [
+            (
+                "not json\nwith controls\u{1b}[2J",
+                ["unparsed_event", "not json\\nwith controls\\u{1b}[2J"].as_slice(),
+                ["not json\\nwith controls\\u{1b}[2J"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"heartbeat","sequence":7,"success":false}"#,
+                ["runa/heartbeat", "sequence=7", "success=false"].as_slice(),
+                [
+                    r#""kind":"heartbeat""#,
+                    r#""sequence":7"#,
+                    r#""success":false"#,
+                ]
+                .as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"kind":"custom_event","detail":"field summary"}"#,
+                ["custom_event", "detail=field summary"].as_slice(),
+                [r#""kind":"custom_event""#, r#""detail":"field summary""#].as_slice(),
+            ),
+        ];
+
+        for (line, summary_expected_parts, full_expected_parts) in cases {
+            let summary = render_transcript_line(line, LiveObservationLevel::Summary);
+            assert!(
+                summary.starts_with("session event: "),
+                "summary output should render a progress line: {summary:?}"
+            );
+            for expected in summary_expected_parts {
+                assert!(
+                    summary.contains(expected),
+                    "summary output should contain fallback detail {expected:?}: {summary:?}"
+                );
+            }
+            assert!(
+                !summary[..summary.len() - 1].contains('\n') && !summary.contains('\u{1b}'),
+                "summary output should escape fallback controls: {summary:?}"
+            );
+
+            let full = render_transcript_line(line, LiveObservationLevel::Full);
+            assert!(
+                full.starts_with("session event: session_id=fake-session-1 "),
+                "full output should include session context: {full:?}"
+            );
+            for expected in full_expected_parts {
+                assert!(
+                    full.contains(expected),
+                    "full output should contain raw detail {expected:?}: {full:?}"
+                );
+            }
+            assert!(
+                !full[..full.len() - 1].contains('\n') && !full.contains('\u{1b}'),
+                "full output should escape fallback controls: {full:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_progress_escapes_untrusted_display_fields_and_bounds_payloads() {
+        let output = render_transcript_line(
+            &format!(
+                r#"{{"source":"runa","kind":"agent_input\nspoof\u001b[2J","content":"{}"}}"#,
+                "x".repeat(600)
+            ),
+            LiveObservationLevel::Summary,
+        );
+
         assert!(
             !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
             "summary output should not contain embedded terminal controls: {output:?}"
+        );
+        assert!(
+            output.len() < 360,
+            "summary output should keep long payload previews bounded: {} bytes",
+            output.len()
+        );
+        assert!(
+            output.contains("agent_input\\nspoof\\u{1b}[2J") && output.contains("xxx"),
+            "summary output should retain escaped role and payload preview: {output:?}"
         );
     }
 

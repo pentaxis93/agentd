@@ -100,7 +100,7 @@ struct BlockingFirstRunExecutor {
     state: Arc<BlockingFirstRunState>,
     first_outcome: SessionOutcome,
     later_outcome: SessionOutcome,
-    first_progress_line: Option<String>,
+    first_progress_lines: Vec<String>,
 }
 
 struct BlockingFirstRunState {
@@ -193,12 +193,18 @@ impl BlockingFirstRunExecutor {
             }),
             first_outcome,
             later_outcome,
-            first_progress_line: None,
+            first_progress_lines: Vec::new(),
         }
     }
 
     fn with_first_progress_line(mut self, line: &str) -> Self {
-        self.first_progress_line = Some(line.to_string());
+        self.first_progress_lines.push(line.to_string());
+        self
+    }
+
+    fn with_first_progress_lines(mut self, lines: &[&str]) -> Self {
+        self.first_progress_lines
+            .extend(lines.iter().map(|line| (*line).to_string()));
         self
     }
 
@@ -237,7 +243,7 @@ impl SessionExecutor for BlockingFirstRunExecutor {
             started_cvar.notify_all();
             drop(started);
 
-            if let Some(line) = &self.first_progress_line {
+            for line in &self.first_progress_lines {
                 progress.observe(SessionProgressEvent::TranscriptEvent {
                     session_id: "fake-session-1".to_string(),
                     line: line.clone(),
@@ -488,9 +494,11 @@ fn client_receives_execution_progress_while_session_is_still_running() {
         SessionOutcome::Success { exit_code: 0 },
         SessionOutcome::Success { exit_code: 0 },
     )
-    .with_first_progress_line(
+    .with_first_progress_lines(&[
         r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
-    );
+        r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","tool":"shell"}"#,
+        r#"{"schema_version":1,"source":"runa","kind":"agent_exit","success":true,"exit_code":0}"#,
+    ]);
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
@@ -517,7 +525,7 @@ fn client_receives_execution_progress_while_session_is_still_running() {
     executor.wait_for_first_run_to_start();
     let mut progress = String::new();
     let deadline = Instant::now() + Duration::from_secs(1);
-    while !progress.contains("session event: agent_input") {
+    while !progress.contains("success=true") {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
             !remaining.is_zero(),
@@ -529,10 +537,16 @@ fn client_receives_execution_progress_while_session_is_still_running() {
                 .expect("execution progress should reach the client before the session completes"),
         );
     }
-    assert!(
-        progress.contains("session event: agent_input"),
-        "unexpected progress output: {progress}"
-    );
+    for expected in [
+        "session event: runa/agent_input working step",
+        "session event: runa-mcp/tool_call protocol=mcp action=tools/call tool=shell",
+        "session event: runa/agent_exit success=true exit_code=0",
+    ] {
+        assert!(
+            progress.contains(expected),
+            "default summary progress should include followable transcript detail {expected:?}: {progress}"
+        );
+    }
     assert!(
         !client_request.is_finished(),
         "client should still be waiting for the terminal outcome after progress arrives"
@@ -575,7 +589,7 @@ fn client_full_progress_includes_raw_execution_event_detail() {
         SessionOutcome::Success { exit_code: 0 },
     )
     .with_first_progress_line(
-        r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
+        r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","success":true,"content":"working step"}"#,
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
@@ -616,6 +630,18 @@ fn client_full_progress_includes_raw_execution_event_detail() {
         );
     }
     assert!(progress.contains("session_id=fake-session-1"), "{progress}");
+    for expected in [
+        r#""source":"runa-mcp""#,
+        r#""kind":"tool_call""#,
+        r#""protocol":"mcp""#,
+        r#""action":"tools/call""#,
+        r#""success":true"#,
+    ] {
+        assert!(
+            progress.contains(expected),
+            "full progress should include raw event detail {expected:?}: {progress}"
+        );
+    }
     assert!(
         !client_request.is_finished(),
         "client should still be waiting for the terminal outcome after full progress arrives"
