@@ -22,9 +22,9 @@ const WISH_ABOUT: &str = "Elicit a wish and seed one governed session.";
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ProgressLevel {
-    /// Print concise live session lifecycle messages.
+    /// Print compact live transcript activity.
     Summary,
-    /// Print live session lifecycle messages with all available fields.
+    /// Print raw live transcript event detail.
     Full,
 }
 
@@ -144,7 +144,7 @@ enum Command {
     /// Trigger a manual session through the running daemon.
     #[command(
         display_name = "agentd",
-        after_help = "Live observation:\n  agentd run streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
+        after_help = "Live observation:\n  agentd run streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
     )]
     Run {
         agent: String,
@@ -196,7 +196,7 @@ fn main() -> ExitCode {
 
 fn wish_after_help() -> String {
     format!(
-        "Live observation:\n  agentd wish streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nPrompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}\n\nOr seed the session from an existing work-unit instead of prose:\n  agentd wish <AGENT> [REPO] --work-unit <ID>"
+        "Live observation:\n  agentd wish streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.\n\nPrompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}\n\nOr seed the session from an existing work-unit instead of prose:\n  agentd wish <AGENT> [REPO] --work-unit <ID>"
     )
 }
 

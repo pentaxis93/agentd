@@ -65,8 +65,9 @@ live progress for a run request. `dispatch_started` is a start marker;
 same nested runa event source that sealed audit finalization reads:
 `agentd/transcript/deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl`.
 `agentd wish` and `agentd run` render these frames in the invoking terminal
-while they wait for the terminal outcome; `--progress summary` prints concise
-event names and `--progress full` includes the raw transcript event line.
+while they wait for the terminal outcome; `--progress summary` prints compact
+transcript activity with payload, action, or exit details and `--progress full`
+includes the raw transcript event line.
 Progress delivery is best-effort: oversized transcript records and progress
 frames that cannot fit without preserving room for the terminal response are
 dropped whole. The daemon never emits partial progress JSON frames, and the

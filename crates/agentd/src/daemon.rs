@@ -32,6 +32,8 @@ const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 const MAX_PROGRESS_FRAME_BYTES: usize = 128 * 1024;
 const PROGRESS_QUEUE_CAPACITY: usize = 64;
 const PROGRESS_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const SUMMARY_PREVIEW_CHARS: usize = 240;
+const SUMMARY_MAX_FIELDS: usize = 6;
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -93,9 +95,9 @@ pub enum ClientError {
 /// Client-side rendering level for live session observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveObservationLevel {
-    /// Print concise lifecycle markers while waiting for the terminal outcome.
+    /// Print compact followable transcript activity while waiting for the terminal outcome.
     Summary,
-    /// Print lifecycle markers with every field carried by the progress frame.
+    /// Print raw progress frame detail for live session inspection.
     Full,
 }
 
@@ -571,16 +573,124 @@ impl fmt::Display for OperatorField<'_> {
 }
 
 fn summarize_transcript_event(line: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|event| {
-            event
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                .filter(|kind| !kind.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unparsed_event".to_string())
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+        return format!("unparsed_event {}", preview_field(line));
+    };
+    let Some(event) = event.as_object() else {
+        return format!("unparsed_event {}", preview_field(line));
+    };
+
+    let role = transcript_event_role(event);
+    if let Some(payload) = ["content", "message", "text"]
+        .iter()
+        .find_map(|key| nonempty_string_field(event, key))
+    {
+        return format!("{role} {}", preview_field(payload));
+    }
+
+    let fields = transcript_scalar_summary(event);
+    if fields.is_empty() {
+        format!("{role} {}", preview_field(line))
+    } else {
+        format!("{role} {}", fields.join(" "))
+    }
+}
+
+fn transcript_event_role(event: &serde_json::Map<String, serde_json::Value>) -> String {
+    let source = nonempty_string_field(event, "source");
+    let kind = nonempty_string_field(event, "kind");
+
+    match (source, kind) {
+        (Some(source), Some(kind)) => format!("{source}/{kind}"),
+        (None, Some(kind)) => kind.to_string(),
+        _ => "event".to_string(),
+    }
+}
+
+fn transcript_scalar_summary(event: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    const PRIORITY_FIELDS: &[&str] = &[
+        "protocol",
+        "action",
+        "tool",
+        "name",
+        "success",
+        "exit_code",
+        "signal",
+        "error",
+    ];
+    const RESERVED_FIELDS: &[&str] = &[
+        "schema_version",
+        "source",
+        "kind",
+        "content",
+        "message",
+        "text",
+    ];
+
+    let mut fields = Vec::new();
+    for key in PRIORITY_FIELDS {
+        if let Some(value) = scalar_field_display(event.get(*key)) {
+            fields.push(format!("{key}={value}"));
+        }
+    }
+
+    let mut other_keys = event
+        .keys()
+        .filter(|key| !PRIORITY_FIELDS.contains(&key.as_str()))
+        .filter(|key| !RESERVED_FIELDS.contains(&key.as_str()))
+        .collect::<Vec<_>>();
+    other_keys.sort();
+
+    for key in other_keys {
+        if fields.len() >= SUMMARY_MAX_FIELDS {
+            break;
+        }
+        if let Some(value) = scalar_field_display(event.get(key)) {
+            fields.push(format!("{key}={value}"));
+        }
+    }
+
+    fields
+}
+
+fn nonempty_string_field<'a>(
+    event: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    event
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn scalar_field_display(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) if !value.trim().is_empty() => {
+            Some(preview_field(value.trim()))
+        }
+        _ => None,
+    }
+}
+
+fn preview_field(value: &str) -> String {
+    let mut preview = String::new();
+    let mut chars = value.chars();
+
+    for _ in 0..SUMMARY_PREVIEW_CHARS {
+        let Some(character) = chars.next() else {
+            return preview;
+        };
+        preview.push(character);
+    }
+
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+
+    preview
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {

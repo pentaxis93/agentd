@@ -318,8 +318,9 @@ so runa resolves the reference fail-closed before scoped work begins.
 
 `agentd wish` and `agentd run` stream live session progress to the invoking
 terminal while the daemon runs the session. The default `--progress summary`
-prints concise transcript event names before the terminal `session <status>`
-line; `--progress full` includes the session id and raw transcript event line.
+prints compact transcript activity with payload, action, or exit details before
+the terminal `session <status>` line; `--progress full` includes the session id
+and raw transcript event line for detailed inspection.
 
 `agentd run` does not read `agentd.toml`. The client connects to the daemon by
 either:
