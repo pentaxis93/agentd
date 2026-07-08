@@ -143,6 +143,8 @@ enum Command {
         repo: Option<String>,
         #[arg(long)]
         socket_path: Option<PathBuf>,
+        #[arg(long)]
+        work_unit: Option<String>,
     },
 }
 
@@ -162,7 +164,9 @@ fn main() -> ExitCode {
 }
 
 fn wish_after_help() -> String {
-    format!("Prompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}")
+    format!(
+        "Prompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}\n\nOr seed the session from an existing work-unit instead of prose:\n  agentd wish <AGENT> [REPO] --work-unit <ID>"
+    )
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -205,6 +209,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             agent,
             repo,
             socket_path,
+            work_unit,
         }) => {
             if cli.config.is_some() {
                 return Err(Box::new(std::io::Error::new(
@@ -212,7 +217,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--config is only supported for daemon mode, not `agentd wish`",
                 )));
             }
-            run_wish_client(socket_path.as_deref(), agent, repo)
+            run_wish_client(socket_path.as_deref(), agent, repo, work_unit)
         }
     }
 }
@@ -266,7 +271,17 @@ fn run_wish_client(
     explicit_socket_path: Option<&std::path::Path>,
     agent: String,
     repo: Option<String>,
+    work_unit: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Work-unit arm: an operator naming an existing work-unit seeds the
+    // session with it as a work-unit, reaching the same downstream entry
+    // `agentd run --work-unit` reaches. Prose elicitation is skipped
+    // entirely, so a single wish invocation can never carry both a prose
+    // intent and a work-unit reference.
+    if let Some(work_unit) = work_unit {
+        return run_client_with_input(explicit_socket_path, agent, repo, Some(work_unit), None);
+    }
+
     let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout();
     let (statement, target) = read_wish(&mut stdin, &mut stdout)?;
