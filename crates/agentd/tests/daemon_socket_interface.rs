@@ -1,10 +1,10 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -109,44 +109,76 @@ struct BlockingFirstRunState {
     first_released: (Mutex<bool>, Condvar),
 }
 
+const SATURATING_PROGRESS_EVENTS: usize = 256;
+const SMALL_SOCKET_RECEIVE_BUFFER_BYTES: libc::c_int = 4096;
+// This reproduces the rejected dade8ed writer timeout path; production no longer has it.
+const LEGACY_PROGRESS_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
-struct BurstProgressExecutor {
-    completed: Sender<()>,
-    progress_events: usize,
+struct BlockingBurstProgressExecutor {
+    state: Arc<BlockingBurstProgressState>,
     progress_line: String,
 }
 
-const SATURATING_PROGRESS_EVENTS: usize = 4096;
+struct BlockingBurstProgressState {
+    progress_emitted: (Mutex<bool>, Condvar),
+    released: AtomicBool,
+}
 
-impl BurstProgressExecutor {
-    fn new(completed: Sender<()>) -> Self {
+impl BlockingBurstProgressExecutor {
+    fn new() -> Self {
         Self {
-            completed,
-            progress_events: SATURATING_PROGRESS_EVENTS,
+            state: Arc::new(BlockingBurstProgressState {
+                progress_emitted: (Mutex::new(false), Condvar::new()),
+                released: AtomicBool::new(false),
+            }),
             progress_line: format!(
                 r#"{{"schema_version":1,"source":"runa","kind":"agent_input","content":"{}"}}"#,
-                "x".repeat(16 * 1024)
+                "x".repeat(96 * 1024)
             ),
         }
     }
+
+    fn wait_for_progress_to_emit(&self) {
+        let (lock, cvar) = &self.state.progress_emitted;
+        let emitted = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (emitted, _) = cvar
+            .wait_timeout_while(emitted, Duration::from_secs(10), |emitted| !*emitted)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(*emitted, "timed out waiting for progress burst");
+    }
+
+    fn release(&self) {
+        self.state.released.store(true, Ordering::Release);
+    }
 }
 
-impl SessionExecutor for BurstProgressExecutor {
+impl SessionExecutor for BlockingBurstProgressExecutor {
     fn run_session(
         &self,
         _spec: SessionSpec,
         _invocation: SessionInvocation,
         progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
-        for index in 0..self.progress_events {
+        let mut index = 0_usize;
+        while !self.state.released.load(Ordering::Acquire) {
             progress.observe(SessionProgressEvent::TranscriptEvent {
                 session_id: format!("fake-session-{index}"),
                 line: self.progress_line.clone(),
             });
+            index += 1;
+
+            if index == SATURATING_PROGRESS_EVENTS {
+                let (emitted_lock, emitted_cvar) = &self.state.progress_emitted;
+                let mut emitted = emitted_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *emitted = true;
+                emitted_cvar.notify_all();
+            }
+
+            thread::sleep(Duration::from_millis(1));
         }
-        self.completed
-            .send(())
-            .expect("completion signal should send");
         Ok(SessionOutcome::Success { exit_code: 0 })
     }
 }
@@ -287,6 +319,101 @@ fn wait_for_path_removal(path: &std::path::Path) {
     }
 
     panic!("timed out waiting for removal of {}", path.display());
+}
+
+fn set_small_receive_buffer(stream: &UnixStream) {
+    let size = SMALL_SOCKET_RECEIVE_BUFFER_BYTES;
+    let result = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&size as *const libc::c_int).cast(),
+            std::mem::size_of_val(&size) as libc::socklen_t,
+        )
+    };
+    assert_eq!(
+        result,
+        0,
+        "failed to constrain client receive buffer: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+fn write_raw_run_request(client: &mut UnixStream, work_unit: &str) {
+    writeln!(
+        client,
+        "{}",
+        json!({
+            "type": "run",
+            "agent": "site-builder",
+            "repo_url": "https://example.com/repo.git",
+            "work_unit": work_unit,
+            "input": null
+        })
+    )
+    .expect("client request should write");
+}
+
+fn read_response_stream(client: &mut UnixStream) -> Vec<u8> {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("client read timeout should be set");
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match client.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => response.extend_from_slice(&buffer[..bytes_read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("client timed out before daemon closed the response stream")
+            }
+            Err(error) => panic!("client failed to read daemon response: {error}"),
+        }
+    }
+    response
+}
+
+fn unread_socket_bytes(stream: &UnixStream) -> usize {
+    let mut bytes: libc::c_int = 0;
+    let result = unsafe { libc::ioctl(stream.as_raw_fd(), libc::FIONREAD, &mut bytes) };
+    assert_eq!(
+        result,
+        0,
+        "failed to inspect unread client bytes: {}",
+        std::io::Error::last_os_error()
+    );
+    usize::try_from(bytes).expect("unread byte count should be non-negative")
+}
+
+fn wait_for_backpressured_client(stream: &UnixStream, minimum_unread_bytes: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_observed = 0_usize;
+    let mut stable_since = Instant::now();
+    loop {
+        let unread = unread_socket_bytes(stream);
+        if unread > last_observed {
+            last_observed = unread;
+            stable_since = Instant::now();
+        }
+
+        if last_observed >= minimum_unread_bytes
+            && stable_since.elapsed() >= Duration::from_millis(100)
+        {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for client receive queue to backpressure the writer; last unread bytes: {last_observed}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn run_daemon_until_shutdown_for_test(
@@ -526,42 +653,26 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
-    let (completed_tx, completed_rx) = mpsc::channel();
-    let executor = BurstProgressExecutor::new(completed_tx);
+    let executor = BlockingBurstProgressExecutor::new();
+    let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
-        run_daemon_until_shutdown_for_test(daemon_config, executor, daemon_shutdown)
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
     let mut client =
         Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
-    writeln!(
+    set_small_receive_buffer(client.as_ref().expect("client should exist"));
+    let backpressure_work_unit = format!("issue-122-{}", "w".repeat(112 * 1024));
+    write_raw_run_request(
         client.as_mut().expect("client should exist"),
-        "{}",
-        json!({
-            "type": "run",
-            "agent": "site-builder",
-            "repo_url": "https://example.com/repo.git",
-            "work_unit": "issue-122",
-            "input": null
-        })
-    )
-    .expect("client request should write");
+        &backpressure_work_unit,
+    );
 
     thread::sleep(Duration::from_millis(50));
 
-    if completed_rx.recv_timeout(Duration::from_secs(5)).is_err() {
-        drop(client.take());
-        shutdown.store(true, Ordering::Release);
-        handle
-            .join()
-            .expect("daemon thread should join after client disconnect")
-            .expect("daemon should exit cleanly after client disconnect");
-        unsafe {
-            std::env::remove_var("AGENTD_GITHUB_TOKEN");
-        }
-        panic!("progress forwarding should not stall session cleanup for a slow-reading client");
-    }
+    executor.wait_for_progress_to_emit();
+    wait_for_backpressured_client(client.as_ref().expect("client should exist"), 200 * 1024);
 
     shutdown.store(true, Ordering::Release);
     let (join_tx, join_rx) = mpsc::channel();
@@ -571,52 +682,25 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
             .send(result)
             .expect("daemon join result should send");
     });
+    executor.release();
 
-    let join_result = match join_rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(result) => result,
-        Err(_) => {
-            drop(client.take());
-            let result = join_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("daemon should join after client disconnect");
-            joiner.join().expect("join helper should join");
-            result.expect("daemon should exit cleanly after client disconnect");
-            unsafe {
-                std::env::remove_var("AGENTD_GITHUB_TOKEN");
-            }
-            panic!("daemon shutdown should not wait for a slow-reading progress client");
-        }
-    };
-
-    joiner.join().expect("join helper should join");
-    join_result.expect("daemon should exit cleanly");
+    thread::sleep(LEGACY_PROGRESS_WRITE_TIMEOUT + Duration::from_secs(15));
 
     let mut client = client.take().expect("client should still be connected");
-    client
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("client read timeout should be set");
-    let mut response = Vec::new();
-    let mut buffer = [0_u8; 8192];
-    loop {
-        match client.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(bytes_read) => {
-                response.extend_from_slice(&buffer[..bytes_read]);
-                thread::sleep(Duration::from_millis(1));
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                panic!("slow-reading client timed out before daemon closed the response stream")
-            }
-            Err(error) => panic!("slow-reading client failed to read daemon response: {error}"),
-        }
-    }
+    let response = read_response_stream(&mut client);
 
     let response = String::from_utf8(response).expect("daemon response should be utf8 JSONL");
+    assert!(
+        response.ends_with('\n'),
+        "daemon must not emit an unterminated JSONL tail under progress backpressure: last bytes {:?}",
+        response
+            .as_bytes()
+            .iter()
+            .rev()
+            .take(32)
+            .copied()
+            .collect::<Vec<_>>()
+    );
     let lines: Vec<&str> = response.lines().collect();
     assert!(
         !lines.is_empty(),
@@ -642,6 +726,11 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
         progress_frames < SATURATING_PROGRESS_EVENTS,
         "slow-reading client should force progress drops, got all {progress_frames} frames"
     );
+    let join_result = join_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("daemon should join after bounded slow-reader drain");
+    joiner.join().expect("join helper should join");
+    join_result.expect("daemon should exit cleanly");
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
     }
@@ -1089,51 +1178,96 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
-    let executor = BlockingFirstRunExecutor::new(
-        SessionOutcome::Success { exit_code: 0 },
-        SessionOutcome::Success { exit_code: 0 },
-    );
+    let executor = BlockingBurstProgressExecutor::new();
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
-    let client_config = config.clone();
-    let client_request = thread::spawn(move || {
-        request_run(
-            client_config.daemon(),
-            &RunRequest {
-                agent: "site-builder".to_string(),
-                repo_url: Some("https://example.com/repo.git".to_string()),
-                work_unit: Some("shutdown".to_string()),
-                input: None,
-            },
-        )
-    });
-    executor.wait_for_first_run_to_start();
+    let mut client =
+        Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
+    set_small_receive_buffer(client.as_ref().expect("client should exist"));
+    write_raw_run_request(client.as_mut().expect("client should exist"), "shutdown");
+    executor.wait_for_progress_to_emit();
+    wait_for_backpressured_client(client.as_ref().expect("client should exist"), 128 * 1024);
 
     shutdown.store(true, Ordering::Release);
+    let (join_tx, join_rx) = mpsc::channel();
+    let joiner = thread::spawn(move || {
+        let result = handle.join().expect("daemon thread should not panic");
+        join_tx
+            .send(result)
+            .expect("daemon join result should send");
+    });
 
-    thread::sleep(Duration::from_millis(500));
-    let exited_before_release = handle.is_finished();
+    executor.release();
+    thread::sleep(Duration::from_millis(250));
 
+    let client = client.take().expect("client should still be connected");
+    let (terminal_tx, terminal_rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("client read timeout should be set");
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes_read = reader
+                .read_line(&mut line)
+                .expect("client should read daemon JSONL");
+            if bytes_read == 0 {
+                return false;
+            }
+            let value: serde_json::Value =
+                serde_json::from_str(&line).expect("daemon must emit complete JSON frames");
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("session_outcome") {
+                terminal_tx
+                    .send(())
+                    .expect("terminal observation should send");
+                return true;
+            }
+        }
+    });
+
+    let mut daemon_finished_before_terminal = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if terminal_rx.try_recv().is_ok() {
+            break;
+        }
+        match join_rx.try_recv() {
+            Ok(result) => {
+                daemon_finished_before_terminal = Some(result);
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("daemon join helper disconnected before reporting a result")
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal outcome should reach the client before the drain bound expires"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let saw_terminal = reader.join().expect("reader thread should join");
+    let daemon_finished_first = daemon_finished_before_terminal.is_some();
+    let daemon_result = match daemon_finished_before_terminal {
+        Some(result) => result,
+        None => join_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("daemon should join after terminal drain"),
+    };
+    joiner.join().expect("join helper should join");
+    daemon_result.expect("daemon should exit cleanly");
+    assert!(saw_terminal, "client should parse the terminal outcome");
     assert!(
-        !exited_before_release,
-        "daemon exited before the in-flight run finished"
-    );
-
-    executor.release_first_run();
-    handle
-        .join()
-        .expect("daemon thread should join")
-        .expect("daemon should exit cleanly");
-    assert_eq!(
-        client_request
-            .join()
-            .expect("client request thread should join")
-            .expect("client request should eventually succeed"),
-        SessionOutcome::Success { exit_code: 0 }
+        !daemon_finished_first,
+        "daemon shutdown completed before the terminal outcome crossed the writer-to-client boundary"
     );
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");

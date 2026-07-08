@@ -443,43 +443,60 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
     let event_files = nested_transcript_event_files(&record_dir.join("agentd/transcript"));
     assert_eq!(
         event_files.len(),
-        1,
-        "multi-stage runa events should share one agentd-owned run segment: {event_files:?}"
+        2,
+        "resolving and scoped runa events should share one agentd-owned run segment: {event_files:?}"
     );
-    let event_path = event_files
-        .first()
-        .expect("full transcript coverage should have an event file");
-    let path_components = event_path
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    let deployment_component_index = path_components
-        .iter()
-        .position(|component| component == "deployments")
-        .expect("nested transcript event path should include deployments component")
-        + 1;
-    let run_component_index = path_components
-        .iter()
-        .position(|component| component == "runs")
-        .expect("nested transcript event path should include runs component")
-        + 1;
     let observed_deployment = observed_transcript_env
         .lines()
         .find_map(|line| line.strip_prefix("deployment="))
         .expect("fake runa should record observed deployment");
+    let mut work_unit_components = Vec::new();
+    for event_path in &event_files {
+        let path_components = event_path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let deployment_component_index = path_components
+            .iter()
+            .position(|component| component == "deployments")
+            .expect("nested transcript event path should include deployments component")
+            + 1;
+        let work_unit_component_index = path_components
+            .iter()
+            .position(|component| component == "work-units")
+            .expect("nested transcript event path should include work-units component")
+            + 1;
+        let run_component_index = path_components
+            .iter()
+            .position(|component| component == "runs")
+            .expect("nested transcript event path should include runs component")
+            + 1;
+        work_unit_components.push(
+            path_components
+                .get(work_unit_component_index)
+                .expect("nested transcript event path should name work-unit component")
+                .clone(),
+        );
+        assert_eq!(
+            path_components
+                .get(deployment_component_index)
+                .map(String::as_str),
+            Some(observed_deployment),
+            "runa events must land under the deployment observed by the post-gosu runa process: {}",
+            event_path.display()
+        );
+        assert_eq!(
+            path_components.get(run_component_index),
+            Some(&session_id.to_string()),
+            "runa must honor agentd's session-stable RUNA_TRANSCRIPT_RUN_ID: {}",
+            event_path.display()
+        );
+    }
+    work_unit_components.sort();
     assert_eq!(
-        path_components
-            .get(deployment_component_index)
-            .map(String::as_str),
-        Some(observed_deployment),
-        "runa events must land under the deployment observed by the post-gosu runa process: {}",
-        event_path.display()
-    );
-    assert_eq!(
-        path_components.get(run_component_index),
-        Some(&session_id.to_string()),
-        "runa must honor agentd's session-stable RUNA_TRANSCRIPT_RUN_ID: {}",
-        event_path.display()
+        work_unit_components,
+        ["76".to_string(), "_unscoped".to_string()],
+        "work-mode execution should include resolving and scoped transcript event paths"
     );
 
     fixture.assert_no_runner_container_left_behind();

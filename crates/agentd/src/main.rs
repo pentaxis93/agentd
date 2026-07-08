@@ -317,7 +317,14 @@ fn run_wish_client(
     // elicitation is skipped entirely, so a single wish invocation can never
     // carry both a prose intent and a work-unit reference.
     if let Some(work_unit) = work_unit {
-        return run_client_with_input(explicit_socket_path, agent, repo, progress, Some(work_unit), None);
+        return run_client_with_input(
+            explicit_socket_path,
+            agent,
+            repo,
+            progress,
+            Some(work_unit),
+            None,
+        );
     }
 
     let mut stdin = std::io::stdin().lock();

@@ -8,7 +8,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, TryLockError, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -31,7 +31,7 @@ const SOCKET_MODE: u32 = 0o600;
 const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 const MAX_PROGRESS_FRAME_BYTES: usize = 128 * 1024;
 const PROGRESS_QUEUE_CAPACITY: usize = 64;
-const PROGRESS_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const PROGRESS_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -647,6 +647,7 @@ fn handle_run_connection(
     input: Option<agentd_runner::InvocationInput>,
 ) -> Result<(), io::Error> {
     let writer = ProgressWriter::spawn(stream)?;
+    let progress_sink = writer.sink();
     let response = {
         let dispatch_progress = ResponseMessage::Progress {
             progress: ProgressMessage::DispatchStarted {
@@ -660,7 +661,7 @@ fn handle_run_connection(
             let progress = ResponseMessage::Progress {
                 progress: ProgressMessage::TranscriptEvent { session_id, line },
             };
-            writer.enqueue_progress(progress);
+            progress_sink.enqueue_progress(progress);
         };
         match dispatch_run_after_preflight(
             config,
@@ -672,7 +673,7 @@ fn handle_run_connection(
             },
             executor,
             || {
-                writer.enqueue_dispatch_progress(dispatch_progress);
+                progress_sink.enqueue_dispatch_progress(dispatch_progress);
             },
             &write_progress,
         ) {
@@ -725,8 +726,14 @@ fn serialize_response_frame(response: &ResponseMessage) -> Result<Vec<u8>, io::E
     Ok(payload)
 }
 
-#[derive(Clone)]
 struct ProgressWriter {
+    shared: Arc<ProgressWriterShared>,
+    completion: mpsc::Receiver<Result<(), io::Error>>,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct ProgressWriterSink {
     shared: Arc<ProgressWriterShared>,
 }
 
@@ -753,7 +760,6 @@ enum ProgressWriterFrame {
 
 impl ProgressWriter {
     fn spawn(stream: UnixStream) -> Result<Self, io::Error> {
-        stream.set_write_timeout(Some(PROGRESS_WRITE_TIMEOUT))?;
         let shared = Arc::new(ProgressWriterShared {
             state: Mutex::new(ProgressWriterState {
                 progress: VecDeque::new(),
@@ -762,22 +768,77 @@ impl ProgressWriter {
             }),
             available: Condvar::new(),
         });
+        let (completion_tx, completion) = mpsc::channel();
         let writer_shared = Arc::clone(&shared);
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                run_progress_writer(stream, writer_shared);
+                run_progress_writer(stream, writer_shared)
             }));
-            if result.is_err() {
-                tracing::error!(
-                    event = "agentd.manual_run_progress_writer_panicked",
-                    "manual run progress writer panicked"
-                );
-            }
+            let completion = match result {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::error!(
+                        event = "agentd.manual_run_progress_writer_panicked",
+                        "manual run progress writer panicked"
+                    );
+                    Err(io::Error::other("manual run progress writer panicked"))
+                }
+            };
+            let _ = completion_tx.send(completion);
         });
 
-        Ok(Self { shared })
+        Ok(Self {
+            shared,
+            completion,
+            handle,
+        })
     }
 
+    fn sink(&self) -> ProgressWriterSink {
+        ProgressWriterSink {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    fn finish(self, response: ResponseMessage) -> Result<(), io::Error> {
+        let terminal = serialize_response_frame(&response)?;
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.progress.retain(|frame| frame.deliver_before_terminal);
+        state.terminal = Some(terminal);
+        self.shared.available.notify_one();
+        drop(state);
+
+        match self
+            .completion
+            .recv_timeout(PROGRESS_TERMINAL_DRAIN_TIMEOUT)
+        {
+            Ok(result) => {
+                join_progress_writer(self.handle);
+                result
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_terminal_drain_abandoned",
+                    timeout_ms = PROGRESS_TERMINAL_DRAIN_TIMEOUT.as_millis(),
+                    "manual run progress writer did not drain the terminal response before the deadline"
+                );
+                Ok(())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                join_progress_writer(self.handle);
+                Err(io::Error::other(
+                    "manual run progress writer exited without reporting completion",
+                ))
+            }
+        }
+    }
+}
+
+impl ProgressWriterSink {
     fn enqueue_progress(&self, response: ResponseMessage) {
         self.enqueue_progress_frame(response, false);
     }
@@ -886,22 +947,21 @@ impl ProgressWriter {
             }
         }
     }
+}
 
-    fn finish(&self, response: ResponseMessage) -> Result<(), io::Error> {
-        let terminal = serialize_response_frame(&response)?;
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.progress.retain(|frame| frame.deliver_before_terminal);
-        state.terminal = Some(terminal);
-        self.shared.available.notify_one();
-        Ok(())
+fn join_progress_writer(handle: JoinHandle<()>) {
+    if handle.join().is_err() {
+        tracing::error!(
+            event = "agentd.manual_run_progress_writer_panicked",
+            "manual run progress writer panicked"
+        );
     }
 }
 
-fn run_progress_writer(mut stream: UnixStream, shared: Arc<ProgressWriterShared>) {
+fn run_progress_writer(
+    mut stream: UnixStream,
+    shared: Arc<ProgressWriterShared>,
+) -> Result<(), io::Error> {
     while let Some(frame) = next_progress_writer_frame(&shared) {
         let is_terminal = matches!(frame, ProgressWriterFrame::Terminal(_));
         let bytes = match frame {
@@ -909,30 +969,21 @@ fn run_progress_writer(mut stream: UnixStream, shared: Arc<ProgressWriterShared>
         };
 
         match stream.write_all(&bytes) {
-            Ok(()) if is_terminal => return,
+            Ok(()) if is_terminal => return Ok(()),
             Ok(()) => {}
-            Err(error) if peer_disconnected_during_response(&error) => return,
-            Err(error) if progress_writer_timed_out(&error) => {
-                tracing::warn!(
-                    event = "agentd.manual_run_progress_writer_timed_out",
-                    error = %error,
-                    timeout_ms = PROGRESS_WRITE_TIMEOUT.as_millis(),
-                    "manual run progress writer timed out and closed the client connection"
-                );
-                let _ = stream.shutdown(std::net::Shutdown::Both);
-                return;
-            }
+            Err(error) if peer_disconnected_during_response(&error) => return Ok(()),
             Err(error) => {
                 tracing::warn!(
                     event = "agentd.manual_run_progress_writer_failed",
                     error = %error,
                     "manual run progress writer closed the client connection after a write failure"
                 );
-                let _ = stream.shutdown(std::net::Shutdown::Both);
-                return;
+                return Err(error);
             }
         }
     }
+
+    Ok(())
 }
 
 fn next_progress_writer_frame(shared: &ProgressWriterShared) -> Option<ProgressWriterFrame> {
@@ -972,13 +1023,6 @@ fn next_progress_writer_frame(shared: &ProgressWriterShared) -> Option<ProgressW
             .wait(state)
             .unwrap_or_else(|poisoned| poisoned.into_inner());
     }
-}
-
-fn progress_writer_timed_out(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-    )
 }
 
 fn peer_disconnected_during_response(error: &io::Error) -> bool {
