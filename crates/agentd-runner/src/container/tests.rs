@@ -414,7 +414,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
-            work_unit: Some("task-42".to_string()),
+            work_unit: Some("42".to_string()),
             input: None,
             timeout: None,
         },
@@ -454,7 +454,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
         "\ngosu 'myagent:myagent' mkdir -p '/home/myagent/repo/.runa/workspace/intent'\n"
     ));
     assert!(
-        script.contains("\"target\":\"task-42\"")
+        script.contains("\"target\":\"42\"")
             && script.contains("/home/myagent/repo/.runa/workspace/intent/operator-input.json"),
         "work-unit reference should be materialized as a target-bearing intent: {script}"
     );
