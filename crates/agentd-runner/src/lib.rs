@@ -42,7 +42,7 @@ use audit::{
     prepare_session_audit_record,
 };
 use container::{create_container, run_container_to_completion, run_container_with_timeout};
-use input::resolve_invocation_input;
+use input::{resolve_invocation_input, resolve_work_unit_seed_input};
 use lifecycle::{
     LifecycleFailureKind, log_lifecycle_failure, log_session_error, log_session_outcome,
     log_session_started, log_session_teardown,
@@ -74,6 +74,9 @@ pub fn run_session(
     validate_invocation(&invocation)?;
     let resolved_input =
         resolve_invocation_input(&spec.methodology_dir, invocation.input.as_ref())?;
+    if let Some(work_unit) = invocation.work_unit.as_deref() {
+        resolve_work_unit_seed_input(&spec.methodology_dir, work_unit)?;
+    }
     let session_id = unique_suffix()?;
 
     let container_name =

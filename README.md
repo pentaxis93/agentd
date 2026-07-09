@@ -277,7 +277,7 @@ documented in [docs/socket-protocol.md](docs/socket-protocol.md).
 Trigger a session through the running daemon:
 
 ```bash
-agentd run site-builder --work-unit issue-42
+agentd run site-builder --work-unit 42
 ```
 
 For operator intent, use `wish`:
@@ -296,7 +296,7 @@ through unchanged for the runtime to interpret.
 Manual invocation also supports lower-level intake-mode and work-mode
 surfaces:
 
-- `--work-unit <ID>` targets existing queued work
+- `--work-unit <ID>` seeds an existing work-unit reference
 - `--intent <TEXT>` synthesizes a canonical intent artifact at
   `.runa/workspace/intent/operator-input.json`
 - `--artifact-type <TYPE> --artifact-file <PATH>` validates and places a
@@ -308,11 +308,13 @@ artifact, combine the selected work-unit id with a matching `work-unit` artifact
 file:
 
 ```bash
-agentd run site-builder --work-unit issue-42 --artifact-type work-unit --artifact-file ./issue-42.json
+agentd run site-builder --work-unit 42 --artifact-type work-unit --artifact-file ./42.json
 ```
 
 The file stem becomes the artifact id, so the file stem must match
-`--work-unit`.
+`--work-unit`. agentd still routes the reference through runa's resolving entry:
+it materializes a target-bearing `intent` seed and launches unscoped `runa run`
+so runa resolves the reference fail-closed before scoped work begins.
 
 `agentd run` does not read `agentd.toml`. The client connects to the daemon by
 either:
@@ -330,8 +332,8 @@ may omit the positional repo argument when the named agent declares `repo`,
 and an explicit repo still overrides the configured default:
 
 ```bash
-agentd run --socket-path /custom/agentd.sock site-builder --work-unit issue-42
-agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit issue-42
+agentd run --socket-path /custom/agentd.sock site-builder --work-unit 42
+agentd run site-builder https://github.com/pentaxis93/agentd.git --work-unit 42
 ```
 
 Text input is methodology-gated. `--intent` is available only when the active
@@ -355,7 +357,7 @@ Examples:
 agentd wish site-builder
 agentd run site-builder --intent "Add a status page"
 agentd run site-builder --artifact-type claim --artifact-file ./claim.json
-agentd run site-builder --work-unit issue-42 --artifact-type work-unit --artifact-file ./issue-42.json
+agentd run site-builder --work-unit 42 --artifact-type work-unit --artifact-file ./42.json
 agentd run site-builder https://github.com/pentaxis93/agentd.git --intent "Review the last release candidate"
 ```
 
@@ -371,7 +373,7 @@ the container, the agent sees:
 - Credentials injected as environment variables
 - `GROUNDWORK_FORGE_TYPE` with the configured active forge type, defaulting to `github`
 - `AGENTD_WORK_UNIT` when the invocation includes one
-- A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `wish`, `--intent`, or `--artifact-file`
+- A pre-materialized artifact under `.runa/workspace/...` when the invocation includes `wish`, `--intent`, `--work-unit`, or `--artifact-file`; `--work-unit` is materialized as `intent/operator-input.json` with the reference in `target`
 - `runa init` state followed by `runa run --agent-command -- <argv>` from the repo directory
 
 The container is force-removed on completion. The session's audit record

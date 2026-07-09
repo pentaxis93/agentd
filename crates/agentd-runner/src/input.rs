@@ -9,6 +9,7 @@ pub(crate) const INVOCATION_INPUT_MOUNT_PATH: &str = "/agentd/invocation-input";
 const INTENT_ARTIFACT_TYPE: &str = "intent";
 const INTENT_ARTIFACT_ID: &str = "operator-input";
 const INTENT_SOURCE: &str = "operator";
+const WORK_UNIT_SEED_STATEMENT: &str = "Work on the referenced work unit.";
 const SUPPORTED_INTENT_CANONICAL_VERSIONS: &[&str] = &["2.0.0"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +104,51 @@ pub(crate) fn resolve_invocation_input(
             }))
         }
     }
+}
+
+pub(crate) fn resolve_work_unit_seed_input(
+    methodology_dir: &Path,
+    work_unit: &str,
+) -> Result<ResolvedInvocationInput, RunnerError> {
+    let manifest = load_manifest(methodology_dir)?;
+    let schema_path = methodology_dir.join("schemas/intent.schema.json");
+    ensure_declared_artifact_type(&manifest, INTENT_ARTIFACT_TYPE).map_err(|message| {
+        RunnerError::InvalidInvocationInput {
+            message: format!("methodology does not support work-unit reference input: {message}"),
+        }
+    })?;
+    let schema =
+        load_schema(&schema_path).map_err(|message| RunnerError::InvalidInvocationInput {
+            message: format!("methodology does not support work-unit reference input: {message}"),
+        })?;
+    ensure_supported_intent_version(&schema).map_err(|message| {
+        RunnerError::InvalidInvocationInput {
+            message: format!("methodology does not support work-unit reference input: {message}"),
+        }
+    })?;
+
+    let document = work_unit_seed_document(work_unit);
+    validate_document(&schema, &document, INTENT_ARTIFACT_TYPE)?;
+
+    Ok(work_unit_seed_resolved_input(work_unit))
+}
+
+pub(crate) fn work_unit_seed_resolved_input(work_unit: &str) -> ResolvedInvocationInput {
+    let document = work_unit_seed_document(work_unit);
+    ResolvedInvocationInput {
+        artifact_type: INTENT_ARTIFACT_TYPE.to_string(),
+        artifact_id: INTENT_ARTIFACT_ID.to_string(),
+        document_json: serde_json::to_string(&document)
+            .expect("work-unit reference seed intent should serialize"),
+    }
+}
+
+fn work_unit_seed_document(work_unit: &str) -> Value {
+    json!({
+        "statement": WORK_UNIT_SEED_STATEMENT,
+        "source": INTENT_SOURCE,
+        "target": work_unit,
+    })
 }
 
 fn load_manifest(methodology_dir: &Path) -> Result<MethodologyManifest, RunnerError> {
@@ -207,7 +253,7 @@ fn render_document(document: &Value) -> Result<String, RunnerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_invocation_input;
+    use super::{resolve_invocation_input, resolve_work_unit_seed_input};
     use crate::types::{InvocationInput, RunnerError};
     use serde_json::json;
     use std::fs;
@@ -266,6 +312,29 @@ mod tests {
                 "statement": "Work on the tracker item",
                 "source": "operator",
                 "target": "tesserine/agentd#154",
+            })
+        );
+
+        fs::remove_dir_all(&methodology_dir).expect("temporary methodology dir should be removed");
+    }
+
+    #[test]
+    fn resolve_work_unit_seed_input_authors_target_bearing_intent() {
+        let methodology_dir = unique_methodology_dir("work-unit-seed-intent");
+        write_intent_methodology_fixture(&methodology_dir, "2.0.0");
+
+        let resolved = resolve_work_unit_seed_input(&methodology_dir, "tesserine/agentd#175")
+            .expect("work-unit reference seed should resolve");
+
+        assert_eq!(resolved.artifact_type, "intent");
+        assert_eq!(resolved.artifact_id, "operator-input");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&resolved.document_json)
+                .expect("resolved work-unit seed should be valid JSON"),
+            json!({
+                "statement": "Work on the referenced work unit.",
+                "source": "operator",
+                "target": "tesserine/agentd#175",
             })
         );
 

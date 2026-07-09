@@ -96,6 +96,11 @@ fn install_intent_schema(path: &Path, version: &str) {
     .expect("intent schema should be written");
 }
 
+fn install_work_unit_seed_methodology(path: &Path) {
+    write_methodology_manifest(path, &["intent"]);
+    install_intent_schema(path, "2.0.0");
+}
+
 fn install_claim_schema(path: &Path) {
     let schema_dir = path.join("schemas");
     fs::create_dir_all(&schema_dir).expect("schema dir should be created");
@@ -145,6 +150,7 @@ fn succeeds_without_timeout_and_cleans_up_container() {
         .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("success-run");
+    install_work_unit_seed_methodology(&fixture.methodology_dir());
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
@@ -297,7 +303,8 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
         .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("work-mode-artifact-run");
-    write_methodology_manifest(&fixture.methodology_dir(), &["work-unit"]);
+    write_methodology_manifest(&fixture.methodology_dir(), &["intent", "work-unit"]);
+    install_intent_schema(&fixture.methodology_dir(), "2.0.0");
     install_work_unit_schema(&fixture.methodology_dir());
     let image = fixture.build_image();
 
@@ -320,12 +327,12 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
         SessionInvocation {
             repo_url: fixture.repo_url(),
             repo_token: None,
-            work_unit: Some("issue-76".to_string()),
+            work_unit: Some("76".to_string()),
             input: Some(InvocationInput::Artifact {
                 artifact_type: "work-unit".to_string(),
-                artifact_id: "issue-76".to_string(),
+                artifact_id: "76".to_string(),
                 document: serde_json::json!({
-                    "id": "issue-76",
+                    "id": "76",
                     "title": "Execute work mode",
                 }),
             }),
@@ -340,12 +347,22 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
     assert_eq!(
         fs::read_to_string(record_dir.join("runa/calls.log"))
             .expect("runa call log should persist"),
-        "init --methodology /agentd/methodology/manifest.toml\nrun --work-unit issue-76 --agent-command -- site-builder exec\n"
+        "init --methodology /agentd/methodology/manifest.toml\nrun --agent-command -- site-builder exec\n"
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(
+            &fs::read_to_string(record_dir.join("runa/workspace/intent/operator-input.json"))
+                .expect("work-unit reference seed should persist"),
+        )
+        .expect("work-unit reference seed should be valid JSON"),
+        serde_json::json!({
+            "statement": "Work on the referenced work unit.",
+            "source": "operator",
+            "target": "76",
+        })
     );
     assert!(
-        record_dir
-            .join("runa/workspace/work-unit/issue-76.json")
-            .exists(),
+        record_dir.join("runa/workspace/work-unit/76.json").exists(),
         "injected work-unit artifact should persist"
     );
     for artifact_path in [
@@ -372,7 +389,7 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
             .expect("session metadata should persist"),
     )
     .expect("session metadata should be valid json");
-    assert_eq!(metadata["work_unit"], "issue-76");
+    assert_eq!(metadata["work_unit"], "76");
     assert_eq!(metadata["outcome"], "success");
     assert_eq!(metadata["exit_code"], 0);
 
@@ -447,6 +464,7 @@ fn succeeds_with_empty_and_non_empty_environment_values() {
         .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("mixed-env-run");
+    install_work_unit_seed_methodology(&fixture.methodology_dir());
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
@@ -648,6 +666,7 @@ fn succeeds_when_methodology_dir_path_contains_commas() {
         "comma-methodology-run",
         "agentd-runner,comma,methodology",
     );
+    install_work_unit_seed_methodology(&fixture.methodology_dir());
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
@@ -948,6 +967,7 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
         .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("audit-success-run");
+    install_work_unit_seed_methodology(&fixture.methodology_dir());
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
@@ -969,7 +989,7 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
         SessionInvocation {
             repo_url: fixture.repo_url(),
             repo_token: None,
-            work_unit: Some("issue-76".to_string()),
+            work_unit: Some("76".to_string()),
             input: None,
             timeout: None,
         },
@@ -992,7 +1012,7 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
     assert_eq!(
         fs::read_to_string(record_dir.join("runa/calls.log"))
             .expect("runa call log should persist"),
-        "init --methodology /agentd/methodology/manifest.toml\nrun --work-unit issue-76 --agent-command -- site-builder exec\n"
+        "init --methodology /agentd/methodology/manifest.toml\nrun --agent-command -- site-builder exec\n"
     );
     let runa_config = fs::read_to_string(record_dir.join("runa/config.toml"))
         .expect("runa config should persist");
@@ -1008,7 +1028,7 @@ fn preserves_host_audit_record_after_successful_session_teardown() {
     .expect("session metadata should be valid json");
     assert_eq!(metadata["agent"], "audit-success-run");
     assert_eq!(metadata["repo_url"], fixture.repo_url());
-    assert_eq!(metadata["work_unit"], "issue-76");
+    assert_eq!(metadata["work_unit"], "76");
     assert_eq!(metadata["outcome"], "success");
     assert_eq!(metadata["exit_code"], 0);
     assert!(metadata["start_timestamp"].is_string());
@@ -1268,6 +1288,7 @@ fn preserves_host_readability_for_restrictive_container_written_audit_entries_af
         .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("audit-restrictive-modes-run");
+    install_work_unit_seed_methodology(&fixture.methodology_dir());
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
@@ -1289,7 +1310,7 @@ fn preserves_host_readability_for_restrictive_container_written_audit_entries_af
         SessionInvocation {
             repo_url: fixture.repo_url(),
             repo_token: None,
-            work_unit: Some("issue-76".to_string()),
+            work_unit: Some("76".to_string()),
             input: None,
             timeout: None,
         },
@@ -1447,6 +1468,7 @@ fn preserves_failing_audit_trail_for_post_mortem_reconstruction() {
         .expect("podman test lock should be acquired");
 
     let fixture = SessionFixture::new("audit-failure-run");
+    install_work_unit_seed_methodology(&fixture.methodology_dir());
     let image = fixture.build_image();
 
     let outcome = run_session_with_test_audit_root(
@@ -1468,7 +1490,7 @@ fn preserves_failing_audit_trail_for_post_mortem_reconstruction() {
         SessionInvocation {
             repo_url: fixture.repo_url(),
             repo_token: None,
-            work_unit: Some("issue-76".to_string()),
+            work_unit: Some("76".to_string()),
             input: None,
             timeout: None,
         },
@@ -2684,9 +2706,9 @@ case "$command_name" in
         fi
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "execute-work-mode-cascade" ]; then
-            [ "${AGENTD_WORK_UNIT:-}" = "issue-76" ]
-            [ -f "${HOME}/repo/.runa/workspace/work-unit/issue-76.json" ]
-            grep -F '"id":"issue-76"' "${HOME}/repo/.runa/workspace/work-unit/issue-76.json"
+            [ "${AGENTD_WORK_UNIT:-}" = "76" ]
+            [ -f "${HOME}/repo/.runa/workspace/work-unit/76.json" ]
+            grep -F '"id":"76"' "${HOME}/repo/.runa/workspace/work-unit/76.json"
             mkdir -p \
                 "${HOME}/repo/.runa/workspace/behavior-contract" \
                 "${HOME}/repo/.runa/workspace/implementation-plan" \

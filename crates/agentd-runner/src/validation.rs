@@ -1563,7 +1563,7 @@ mod tests {
     fn validate_invocation_accepts_supported_manual_intent_surfaces() {
         for (work_unit, input) in [
             (None, None),
-            (Some("issue-42".to_string()), None),
+            (Some("42".to_string()), None),
             (
                 None,
                 Some(InvocationInput::IntentText {
@@ -1572,11 +1572,11 @@ mod tests {
                 }),
             ),
             (
-                Some("issue-42".to_string()),
+                Some("42".to_string()),
                 Some(InvocationInput::Artifact {
                     artifact_type: "work-unit".to_string(),
-                    artifact_id: "issue-42".to_string(),
-                    document: serde_json::json!({ "id": "issue-42" }),
+                    artifact_id: "42".to_string(),
+                    document: serde_json::json!({ "id": "42" }),
                 }),
             ),
         ] {
@@ -1596,7 +1596,7 @@ mod tests {
         let error = validate_invocation(&SessionInvocation {
             repo_url: "https://example.com/agentd.git".to_string(),
             repo_token: None,
-            work_unit: Some("issue-42".to_string()),
+            work_unit: Some("42".to_string()),
             input: Some(InvocationInput::IntentText {
                 statement: "Add a status page".to_string(),
                 target: None,
@@ -1625,10 +1625,10 @@ mod tests {
         let error = validate_invocation(&SessionInvocation {
             repo_url: "https://example.com/agentd.git".to_string(),
             repo_token: None,
-            work_unit: Some("issue-42".to_string()),
+            work_unit: Some("42".to_string()),
             input: Some(InvocationInput::Artifact {
                 artifact_type: "claim".to_string(),
-                artifact_id: "issue-42".to_string(),
+                artifact_id: "42".to_string(),
                 document: serde_json::json!({ "summary": "Ship it" }),
             }),
             timeout: None,
@@ -1651,11 +1651,11 @@ mod tests {
         let error = validate_invocation(&SessionInvocation {
             repo_url: "https://example.com/agentd.git".to_string(),
             repo_token: None,
-            work_unit: Some("issue-42".to_string()),
+            work_unit: Some("42".to_string()),
             input: Some(InvocationInput::Artifact {
                 artifact_type: "work-unit".to_string(),
-                artifact_id: "issue-43".to_string(),
-                document: serde_json::json!({ "id": "issue-43" }),
+                artifact_id: "43".to_string(),
+                document: serde_json::json!({ "id": "43" }),
             }),
             timeout: None,
         })
@@ -1667,7 +1667,7 @@ mod tests {
         );
         let message = error.to_string();
         assert!(
-            message.contains("artifact id") && message.contains("issue-42"),
+            message.contains("artifact id") && message.contains("42"),
             "expected matching-id guidance in message, got {message}"
         );
     }

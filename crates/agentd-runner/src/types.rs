@@ -119,9 +119,9 @@ pub struct SessionInvocation {
     /// request for `https://` repository URLs. This token is not passed
     /// through to the agent runtime.
     pub repo_token: Option<String>,
-    /// Optional work unit identifier passed to `runa run --work-unit` and
-    /// exposed through the runner-managed `AGENTD_WORK_UNIT` environment
-    /// variable when set.
+    /// Optional work-unit reference exposed through the runner-managed
+    /// `AGENTD_WORK_UNIT` environment variable and seeded into runa as an
+    /// intent target so runa resolves the reference before scoped work begins.
     pub work_unit: Option<String>,
     /// Optional operator-supplied input to materialize into the repo
     /// workspace after `runa init` and before `runa run`. Artifact names supplied

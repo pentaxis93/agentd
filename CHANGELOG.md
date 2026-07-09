@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `agentd run --work-unit` and `agentd wish --work-unit` now route the
+  operator-supplied reference through runa's resolving entry by materializing a
+  target-bearing intent seed and invoking unscoped `runa run`, instead of
+  bypassing resolution with `runa run --work-unit`.
+
 - Manual text input now authors canonical intent v2 (`statement`, optional
   `target`, and `source`) end to end: `agentd run --intent`, the daemon
   socket `IntentText` variant, and `.runa/workspace/intent/operator-input.json`

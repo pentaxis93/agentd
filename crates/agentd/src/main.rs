@@ -273,11 +273,10 @@ fn run_wish_client(
     repo: Option<String>,
     work_unit: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Work-unit arm: an operator naming an existing work-unit seeds the
-    // session with it as a work-unit, reaching the same downstream entry
-    // `agentd run --work-unit` reaches. Prose elicitation is skipped
-    // entirely, so a single wish invocation can never carry both a prose
-    // intent and a work-unit reference.
+    // Work-unit arm: an operator naming an existing work-unit reference
+    // reaches the same downstream entry as `agentd run --work-unit`. Prose
+    // elicitation is skipped entirely, so a single wish invocation can never
+    // carry both a prose intent and a work-unit reference.
     if let Some(work_unit) = work_unit {
         return run_client_with_input(explicit_socket_path, agent, repo, Some(work_unit), None);
     }

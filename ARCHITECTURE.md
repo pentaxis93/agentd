@@ -200,7 +200,7 @@ The runner prepares the execution environment:
 
 ### Phase 3: Execution (`agentd-runner`)
 
-The runner drops privileges with `gosu` and launches `runa run [--work-unit <id>] --agent-command -- <argv>` as the unprivileged session user from `/home/{username}/repo`. The argv comes from the declarative agent command, and `runa run` owns protocol execution from there. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange. agentd sets `RUNA_TRANSCRIPT_DIR=/agentd/transcript` and `RUNA_TRANSCRIPT_REDACT_ENV` so runa can persist the execution events it observes.
+The runner drops privileges with `gosu` and launches `runa run --agent-command -- <argv>` as the unprivileged session user from `/home/{username}/repo`. When the invocation includes `work_unit`, agentd materializes that operator-supplied reference as `intent/operator-input.json` with `target` set to the reference, then leaves resolution to runa's unscoped resolving entry so unresolved references fail closed before scoped work begins. The argv comes from the declarative agent command, and `runa run` owns protocol execution from there. Tool invocations happen directly from the runtime to installed CLIs or configured external MCP servers; agentd does not sit in the middle of that protocol exchange. agentd sets `RUNA_TRANSCRIPT_DIR=/agentd/transcript` and `RUNA_TRANSCRIPT_REDACT_ENV` so runa can persist the execution events it observes.
 
 ### Phase 4: Teardown (`agentd-runner`)
 
