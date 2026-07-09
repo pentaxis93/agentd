@@ -59,6 +59,8 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use transcript::{TranscriptEventFile, TranscriptEventSource};
@@ -66,6 +68,19 @@ use validation::{validate_invocation, validate_spec};
 
 const TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_LIVE_TRANSCRIPT_LINE_BYTES: usize = 32 * 1024;
+
+#[cfg(test)]
+#[derive(Default)]
+struct LiveTranscriptDiscoveryProbe {
+    session_id: Option<String>,
+    calls: usize,
+}
+
+#[cfg(test)]
+fn live_transcript_discovery_probe() -> &'static Mutex<LiveTranscriptDiscoveryProbe> {
+    static PROBE: OnceLock<Mutex<LiveTranscriptDiscoveryProbe>> = OnceLock::new();
+    PROBE.get_or_init(|| Mutex::new(LiveTranscriptDiscoveryProbe::default()))
+}
 
 /// Executes a single session from validation through teardown.
 ///
@@ -83,7 +98,7 @@ pub fn run_session(
     spec: SessionSpec,
     invocation: SessionInvocation,
 ) -> Result<SessionOutcome, RunnerError> {
-    run_session_with_progress(spec, invocation, &NoopSessionProgressObserver)
+    run_session_inner(spec, invocation, None)
 }
 
 /// Executes a single session and reports best-effort transcript progress while
@@ -92,6 +107,14 @@ pub fn run_session_with_progress(
     spec: SessionSpec,
     invocation: SessionInvocation,
     progress: &dyn SessionProgressObserver,
+) -> Result<SessionOutcome, RunnerError> {
+    run_session_inner(spec, invocation, Some(progress))
+}
+
+fn run_session_inner(
+    spec: SessionSpec,
+    invocation: SessionInvocation,
+    progress: Option<&dyn SessionProgressObserver>,
 ) -> Result<SessionOutcome, RunnerError> {
     validate_spec(&spec)?;
     validate_invocation(&invocation)?;
@@ -214,13 +237,28 @@ pub fn run_session_with_progress(
     }
 
     let secret_bindings = resources.all_secret_bindings();
-    let start_result = run_container_with_transcript_progress(
-        &resources,
-        &session_id,
-        &secret_bindings,
-        invocation.timeout,
-        progress,
-    );
+    let start_result = match progress {
+        Some(progress) => run_container_with_transcript_progress(
+            &resources,
+            &session_id,
+            &secret_bindings,
+            invocation.timeout,
+            progress,
+        ),
+        None => match invocation.timeout {
+            Some(timeout) => run_container_with_timeout(
+                &resources.container_name,
+                &session_id,
+                &secret_bindings,
+                timeout,
+            ),
+            None => run_container_to_completion(
+                &resources.container_name,
+                &session_id,
+                &secret_bindings,
+            ),
+        },
+    };
 
     match &start_result {
         Ok(outcome) => log_session_outcome(&session_id, &resources.container_name, outcome),
@@ -320,6 +358,8 @@ fn observe_transcript_events(
 ) {
     let mut readers = BTreeMap::<TranscriptEventFile, LiveTranscriptReader>::new();
     loop {
+        #[cfg(test)]
+        record_live_transcript_discovery_for_tests(session_id);
         let discovered = match source.discover_event_files() {
             Ok(discovered) => discovered,
             Err(error) => {
@@ -369,6 +409,41 @@ fn observe_transcript_events(
             return;
         }
         thread::sleep(TRANSCRIPT_POLL_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+fn reset_live_transcript_discovery_probe_for_tests() {
+    let mut probe = live_transcript_discovery_probe()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *probe = LiveTranscriptDiscoveryProbe::default();
+}
+
+#[cfg(test)]
+fn set_live_transcript_discovery_probe_session_for_tests(session_id: String) {
+    let mut probe = live_transcript_discovery_probe()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    probe.session_id = Some(session_id);
+    probe.calls = 0;
+}
+
+#[cfg(test)]
+fn live_transcript_discovery_calls_for_tests() -> usize {
+    live_transcript_discovery_probe()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .calls
+}
+
+#[cfg(test)]
+fn record_live_transcript_discovery_for_tests(session_id: &str) {
+    let mut probe = live_transcript_discovery_probe()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if probe.session_id.as_deref() == Some(session_id) {
+        probe.calls += 1;
     }
 }
 
@@ -559,6 +634,37 @@ mod tests {
                 .expect("session metadata should be readable"),
         )
         .expect("session metadata should be valid json")
+    }
+
+    fn write_intent_methodology_fixture(methodology_dir: &Path) {
+        fs::create_dir_all(methodology_dir.join("schemas"))
+            .expect("methodology schemas dir should be created");
+        fs::write(
+            methodology_dir.join("manifest.toml"),
+            "[[artifact_types]]\nname = \"intent\"\n",
+        )
+        .expect("methodology manifest should be written");
+        fs::write(
+            methodology_dir.join("schemas/intent.schema.json"),
+            r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-tesserine-canonical": {
+    "version": "2.0.0",
+    "schema_url": "https://example.com/intent.schema.json",
+    "prose_url": "https://example.com/INTENT.md"
+  },
+  "type": "object",
+  "required": ["statement", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "statement": { "type": "string", "minLength": 1 },
+    "source": { "type": "string", "minLength": 1 },
+    "target": { "type": "string", "minLength": 1 }
+  }
+}
+"#,
+        )
+        .expect("intent schema should be written");
     }
 
     fn make_tree_writable(path: &Path) {
@@ -880,6 +986,26 @@ mod tests {
 
         make_tree_writable(&audit_root);
         fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn run_session_does_not_poll_live_transcript_events() {
+        let discovery_calls = run_session_with_live_transcript_discovery_probe(false);
+
+        assert_eq!(
+            discovery_calls, 0,
+            "no-progress sessions must not start live transcript discovery"
+        );
+    }
+
+    #[test]
+    fn run_session_with_progress_polls_live_transcript_events() {
+        let discovery_calls = run_session_with_live_transcript_discovery_probe(true);
+
+        assert!(
+            discovery_calls > 0,
+            "progress sessions should start live transcript discovery"
+        );
     }
 
     #[test]
@@ -1452,6 +1578,130 @@ mod tests {
                 Instant::now() < deadline,
                 "timed out waiting for session record under {}",
                 agent_root.display()
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn run_session_with_live_transcript_discovery_probe(use_progress: bool) -> usize {
+        const REPO_URL: &str = "https://example.com/agentd.git";
+
+        let _guard = fake_podman_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = FakePodmanFixture::new();
+        fixture.install(
+            &FakePodmanScenario::new().with_start(CommandBehavior::from_outcome(
+                CommandOutcome::new()
+                    .touch_file("start-blocked")
+                    .wait_for_file(
+                        "release-start",
+                        Duration::from_secs(5),
+                        "timed out waiting to release start",
+                        91,
+                    ),
+            )),
+        );
+        let methodology_dir = fixture.create_methodology_dir("runner-methodology");
+        write_intent_methodology_fixture(&methodology_dir);
+        let audit_root = unique_temp_dir("runner-live-transcript-opt-in");
+        fs::create_dir_all(&audit_root).expect("audit root should be created");
+        let helper_audit_root = audit_root.clone();
+        reset_live_transcript_discovery_probe_for_tests();
+
+        let discovery_calls = fixture.run_with_fake_podman_env(|| {
+            let log_dir = PathBuf::from(
+                std::env::var("AGENTD_FAKE_PODMAN_LOG_DIR")
+                    .expect("fake podman log dir should be configured"),
+            );
+            let helper = thread::spawn(move || {
+                release_start_after_live_transcript_probe(log_dir, helper_audit_root, use_progress);
+            });
+
+            let spec = SessionSpec {
+                methodology_dir,
+                audit_root: audit_root.clone(),
+                ..test_session_spec()
+            };
+            let invocation = SessionInvocation {
+                repo_url: REPO_URL.to_string(),
+                repo_token: None,
+                work_unit: Some("issue-176".to_string()),
+                input: None,
+                timeout: None,
+            };
+            let outcome = if use_progress {
+                let progress = |_event: SessionProgressEvent| {};
+                run_session_with_progress(spec, invocation, &progress)
+            } else {
+                run_session(spec, invocation)
+            }
+            .expect("session should succeed");
+
+            assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
+
+            helper
+                .join()
+                .expect("live transcript probe helper should complete");
+            live_transcript_discovery_calls_for_tests()
+        });
+
+        let record_dir = only_session_record_dir(&audit_root, "site-builder");
+        let metadata = read_session_metadata(&record_dir);
+        assert_eq!(metadata["outcome"], "success");
+
+        make_tree_writable(&audit_root);
+        fs::remove_dir_all(&audit_root).expect("temporary audit root should be removed");
+        reset_live_transcript_discovery_probe_for_tests();
+
+        discovery_calls
+    }
+
+    fn release_start_after_live_transcript_probe(
+        log_dir: PathBuf,
+        audit_root: PathBuf,
+        expect_progress: bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !log_dir.join("start-blocked").exists() {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            log_dir.join("start-blocked").exists(),
+            "fake podman start should block before probing live transcript discovery"
+        );
+
+        let record_dir = wait_for_only_session_record_dir(&audit_root, "site-builder", deadline);
+        let session_id = record_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("record dir should be named by utf-8 session id")
+            .to_string();
+        set_live_transcript_discovery_probe_session_for_tests(session_id);
+
+        let observed_progress = wait_for_live_transcript_discovery(expect_progress, deadline);
+        fs::write(log_dir.join("release-start"), b"release\n")
+            .expect("fake podman start should be released");
+        assert_eq!(
+            observed_progress, expect_progress,
+            "live transcript discovery observation did not match progress opt-in"
+        );
+    }
+
+    fn wait_for_live_transcript_discovery(expect_progress: bool, deadline: Instant) -> bool {
+        if !expect_progress {
+            thread::sleep(Duration::from_millis(250));
+            return live_transcript_discovery_calls_for_tests() > 0;
+        }
+
+        loop {
+            let observed = live_transcript_discovery_calls_for_tests() > 0;
+            if observed {
+                return observed;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for live transcript discovery"
             );
             thread::sleep(Duration::from_millis(25));
         }
