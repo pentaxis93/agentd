@@ -20,6 +20,7 @@ mod podman;
 mod reconcile;
 mod resources;
 mod session_paths;
+mod transcript;
 mod types;
 mod validation;
 
@@ -29,8 +30,9 @@ pub(crate) mod test_support;
 pub use reconcile::reconcile_startup_resources;
 pub use types::{
     AgentNameValidationError, BindMount, EnvironmentNameValidationError, InvocationInput,
-    MountOverlapError, MountTargetValidationError, ResolvedEnvironmentVariable, RunnerError,
-    SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    MountOverlapError, MountTargetValidationError, NoopSessionProgressObserver,
+    ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome,
+    SessionProgressEvent, SessionProgressObserver, SessionSpec, StartupReconciliationReport,
 };
 pub use validation::{
     validate_agent_name, validate_environment_name, validate_mount_overlap, validate_mount_target,
@@ -49,10 +51,21 @@ use lifecycle::{
 };
 use naming::format_container_name;
 use resources::{
-    ResourceAllocationFailure, SessionResources, cleanup_methodology_staging_dir,
+    ResourceAllocationFailure, SecretBinding, SessionResources, cleanup_methodology_staging_dir,
     cleanup_podman_secrets, prepare_session_resources, unique_suffix,
 };
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+use transcript::{TranscriptEventFile, TranscriptEventSource};
 use validation::{validate_invocation, validate_spec};
+
+const TRANSCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_LIVE_TRANSCRIPT_LINE_BYTES: usize = 32 * 1024;
 
 /// Executes a single session from validation through teardown.
 ///
@@ -69,6 +82,16 @@ use validation::{validate_invocation, validate_spec};
 pub fn run_session(
     spec: SessionSpec,
     invocation: SessionInvocation,
+) -> Result<SessionOutcome, RunnerError> {
+    run_session_with_progress(spec, invocation, &NoopSessionProgressObserver)
+}
+
+/// Executes a single session and reports best-effort transcript progress while
+/// the session process is running.
+pub fn run_session_with_progress(
+    spec: SessionSpec,
+    invocation: SessionInvocation,
+    progress: &dyn SessionProgressObserver,
 ) -> Result<SessionOutcome, RunnerError> {
     validate_spec(&spec)?;
     validate_invocation(&invocation)?;
@@ -191,17 +214,13 @@ pub fn run_session(
     }
 
     let secret_bindings = resources.all_secret_bindings();
-    let start_result = match invocation.timeout {
-        Some(timeout) => run_container_with_timeout(
-            &resources.container_name,
-            &session_id,
-            &secret_bindings,
-            timeout,
-        ),
-        None => {
-            run_container_to_completion(&resources.container_name, &session_id, &secret_bindings)
-        }
-    };
+    let start_result = run_container_with_transcript_progress(
+        &resources,
+        &session_id,
+        &secret_bindings,
+        invocation.timeout,
+        progress,
+    );
 
     match &start_result {
         Ok(outcome) => log_session_outcome(&session_id, &resources.container_name, outcome),
@@ -250,6 +269,217 @@ pub fn run_session(
     }
 }
 
+fn run_container_with_transcript_progress(
+    resources: &SessionResources,
+    session_id: &str,
+    secret_bindings: &[SecretBinding],
+    timeout: Option<Duration>,
+    progress: &dyn SessionProgressObserver,
+) -> Result<SessionOutcome, RunnerError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    thread::scope(|scope| {
+        let observer_stop = Arc::clone(&stop);
+        let observer = scope.spawn(move || {
+            observe_transcript_events(
+                TranscriptEventSource::from_record(&resources.audit_record),
+                session_id,
+                progress,
+                &observer_stop,
+            );
+        });
+
+        let result = match timeout {
+            Some(timeout) => run_container_with_timeout(
+                &resources.container_name,
+                session_id,
+                secret_bindings,
+                timeout,
+            ),
+            None => {
+                run_container_to_completion(&resources.container_name, session_id, secret_bindings)
+            }
+        };
+        stop.store(true, Ordering::Release);
+        if observer.join().is_err() {
+            tracing::warn!(
+                event = "runner.transcript_progress_observer_panicked",
+                session_id = session_id,
+                container_name = %resources.container_name,
+                "transcript progress observer panicked"
+            );
+        }
+        result
+    })
+}
+
+fn observe_transcript_events(
+    source: TranscriptEventSource,
+    session_id: &str,
+    progress: &dyn SessionProgressObserver,
+    stop: &AtomicBool,
+) {
+    let mut readers = BTreeMap::<TranscriptEventFile, LiveTranscriptReader>::new();
+    loop {
+        let discovered = match source.discover_event_files() {
+            Ok(discovered) => discovered,
+            Err(error) => {
+                tracing::warn!(
+                    event = "runner.transcript_progress_unavailable",
+                    session_id = session_id,
+                    error = %error,
+                    "live transcript progress unavailable"
+                );
+                return;
+            }
+        };
+
+        for event_file in discovered {
+            if readers.contains_key(&event_file) {
+                continue;
+            }
+            match source.open_event_file(&event_file) {
+                Ok(file) => {
+                    readers.insert(event_file, LiveTranscriptReader::new(file));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "runner.transcript_progress_unavailable",
+                        session_id = session_id,
+                        error = %error,
+                        "live transcript progress unavailable"
+                    );
+                    return;
+                }
+            }
+        }
+
+        for reader in readers.values_mut() {
+            if let Err(error) = reader.drain_available(session_id, progress) {
+                tracing::warn!(
+                    event = "runner.transcript_progress_read_failed",
+                    session_id = session_id,
+                    error = %error,
+                    "failed to read live transcript progress"
+                );
+                return;
+            }
+        }
+
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        thread::sleep(TRANSCRIPT_POLL_INTERVAL);
+    }
+}
+
+struct LiveTranscriptReader {
+    reader: BufReader<File>,
+    pending_line: Vec<u8>,
+    dropping_oversized_line: bool,
+}
+
+impl LiveTranscriptReader {
+    fn new(file: File) -> Self {
+        Self {
+            reader: BufReader::new(file),
+            pending_line: Vec::new(),
+            dropping_oversized_line: false,
+        }
+    }
+
+    fn drain_available(
+        &mut self,
+        session_id: &str,
+        progress: &dyn SessionProgressObserver,
+    ) -> Result<(), io::Error> {
+        loop {
+            let consumed = self.drain_buffer(session_id, progress)?;
+            if consumed == 0 {
+                return Ok(());
+            }
+            self.reader.consume(consumed);
+        }
+    }
+
+    fn drain_buffer(
+        &mut self,
+        session_id: &str,
+        progress: &dyn SessionProgressObserver,
+    ) -> Result<usize, io::Error> {
+        let consumed = match self.reader.fill_buf() {
+            Ok([]) => return Ok(0),
+            Ok(buffer) => {
+                let mut consumed = 0;
+                while consumed < buffer.len() {
+                    let remaining = &buffer[consumed..];
+                    let segment_len = remaining
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .map_or(remaining.len(), |newline| newline + 1);
+                    let segment = &remaining[..segment_len];
+                    let line_complete = segment.ends_with(b"\n");
+
+                    if self.dropping_oversized_line {
+                        if line_complete {
+                            self.dropping_oversized_line = false;
+                        }
+                        consumed += segment_len;
+                        continue;
+                    }
+
+                    if self.pending_line.len().saturating_add(segment.len())
+                        > MAX_LIVE_TRANSCRIPT_LINE_BYTES
+                    {
+                        self.pending_line.clear();
+                        self.dropping_oversized_line = !line_complete;
+                        tracing::debug!(
+                            event = "runner.transcript_progress_oversized_record_dropped",
+                            session_id = session_id,
+                            max_bytes = MAX_LIVE_TRANSCRIPT_LINE_BYTES,
+                            "dropped oversized live transcript progress record"
+                        );
+                        consumed += segment_len;
+                        continue;
+                    }
+
+                    self.pending_line.extend_from_slice(segment);
+                    consumed += segment_len;
+
+                    if line_complete {
+                        if let Some(line) = live_transcript_line_from_bytes(&self.pending_line) {
+                            progress.observe(SessionProgressEvent::TranscriptEvent {
+                                session_id: session_id.to_string(),
+                                line,
+                            });
+                        }
+                        self.pending_line.clear();
+                    }
+                }
+                consumed
+            }
+            Err(error) => return Err(error),
+        };
+
+        Ok(consumed)
+    }
+}
+
+fn live_transcript_line_from_bytes(bytes: &[u8]) -> Option<String> {
+    let line = String::from_utf8_lossy(trim_line_end_bytes(bytes)).into_owned();
+    if line.trim().is_empty() {
+        None
+    } else {
+        Some(line)
+    }
+}
+
+fn trim_line_end_bytes(mut bytes: &[u8]) -> &[u8] {
+    while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
 fn cleanup_session_resources(resources: &SessionResources) -> Result<(), RunnerError> {
     let container_result = container::cleanup_container(&resources.container_name);
     let secret_bindings = resources.all_secret_bindings();
@@ -295,8 +525,11 @@ mod tests {
     };
     use serde_json::Value;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -347,6 +580,218 @@ mod tests {
     }
 
     const TEST_DAEMON_INSTANCE_ID: &str = "1a2b3c4d";
+
+    #[test]
+    fn transcript_observer_waits_for_newline_before_reporting_live_event() {
+        let (root, _record, source, events_path) =
+            live_transcript_fixture("agentd-live-transcript-observer");
+        fs::create_dir_all(events_path.parent().expect("event path parent"))
+            .expect("nested transcript dir should be created");
+        fs::write(&events_path, "").expect("transcript events should be created");
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let observer = |event| {
+                tx.send(event).expect("progress event should send");
+            };
+            let observer_source = source.clone();
+            let observer_stop = &stop;
+            let handle = scope.spawn(move || {
+                observe_transcript_events(observer_source, "session-123", &observer, observer_stop);
+            });
+
+            let mut events = fs::OpenOptions::new()
+                .append(true)
+                .open(&events_path)
+                .expect("transcript events should reopen");
+            events
+                .write_all(
+                    br#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working"}"#,
+                )
+                .expect("partial transcript event should be written");
+            events
+                .flush()
+                .expect("partial transcript event should flush");
+
+            assert!(
+                rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "observer must not report a transcript event before its newline is written"
+            );
+
+            events
+                .write_all(b"\n")
+                .expect("transcript event newline should be written");
+            events
+                .flush()
+                .expect("complete transcript event should flush");
+
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(2))
+                    .expect("observer should report a live transcript event"),
+                SessionProgressEvent::TranscriptEvent {
+                    session_id: "session-123".to_string(),
+                    line: r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working"}"#.to_string(),
+                }
+            );
+
+            stop.store(true, Ordering::Release);
+            handle.join().expect("observer should not panic");
+        });
+        fs::remove_dir_all(root).expect("transcript fixture root should be removed");
+    }
+
+    #[test]
+    fn transcript_observer_drops_oversized_records_whole_and_resumes_after_newline() {
+        let (root, _record, source, events_path) =
+            live_transcript_fixture("agentd-live-transcript-observer-oversized");
+        fs::create_dir_all(events_path.parent().expect("event path parent"))
+            .expect("nested transcript dir should be created");
+        fs::write(&events_path, "").expect("transcript events should be created");
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let observer = |event| {
+                tx.send(event).expect("progress event should send");
+            };
+            let observer_source = source.clone();
+            let observer_stop = &stop;
+            let handle = scope.spawn(move || {
+                observe_transcript_events(observer_source, "session-123", &observer, observer_stop);
+            });
+
+            let mut events = fs::OpenOptions::new()
+                .append(true)
+                .open(&events_path)
+                .expect("transcript events should reopen");
+            events
+                .write_all(&vec![b'x'; MAX_LIVE_TRANSCRIPT_LINE_BYTES + 1])
+                .expect("oversized unterminated transcript event should be written");
+            events
+                .flush()
+                .expect("oversized transcript event should flush");
+
+            assert!(
+                rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "observer must not report an oversized unterminated transcript record"
+            );
+
+            events
+                .write_all(
+                    br#"
+{"schema_version":1,"source":"runa","kind":"agent_input","content":"after oversized"}
+"#,
+                )
+                .expect("oversized terminator and valid event should be written");
+            events.flush().expect("valid transcript event should flush");
+
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(2))
+                    .expect("observer should report the valid event after oversized drop"),
+                SessionProgressEvent::TranscriptEvent {
+                    session_id: "session-123".to_string(),
+                    line: r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"after oversized"}"#.to_string(),
+                }
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "oversized record should be dropped whole, not emitted as a fragment"
+            );
+
+            stop.store(true, Ordering::Release);
+            handle.join().expect("observer should not panic");
+        });
+        fs::remove_dir_all(root).expect("transcript fixture root should be removed");
+    }
+
+    #[test]
+    fn transcript_observer_ignores_events_under_runa_minted_run_id() {
+        let (root, _record, source, events_path) =
+            live_transcript_fixture("agentd-live-transcript-observer-minted-run-id");
+        let runs_dir = events_path
+            .parent()
+            .and_then(Path::parent)
+            .expect("event path should have a runs directory");
+        let minted_events_path = runs_dir.join("run-minted-by-runa").join("events.jsonl");
+        fs::create_dir_all(
+            minted_events_path
+                .parent()
+                .expect("minted event path parent"),
+        )
+        .expect("minted run event dir should be created");
+        fs::write(
+            &minted_events_path,
+            "{\"schema_version\":2,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"minted\"}\n",
+        )
+        .expect("minted events should be written");
+
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let observer = |event| {
+                tx.send(event).expect("progress event should send");
+            };
+            let observer_source = source.clone();
+            let observer_stop = &stop;
+            let handle = scope.spawn(move || {
+                observe_transcript_events(observer_source, "session-123", &observer, observer_stop);
+            });
+
+            assert!(
+                rx.recv_timeout(Duration::from_millis(250)).is_err(),
+                "observer must not pass by scanning runa-minted runs/* events"
+            );
+
+            fs::create_dir_all(events_path.parent().expect("exact event path parent"))
+                .expect("exact run event dir should be created");
+            fs::write(
+                &events_path,
+                "{\"schema_version\":2,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"exact\"}\n",
+            )
+            .expect("exact events should be written");
+
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(2))
+                    .expect("observer should report the exact-run-id event"),
+                SessionProgressEvent::TranscriptEvent {
+                    session_id: "session-123".to_string(),
+                    line: r#"{"schema_version":2,"source":"runa","kind":"agent_input","content":"exact"}"#.to_string(),
+                }
+            );
+
+            stop.store(true, Ordering::Release);
+            handle.join().expect("observer should not panic");
+        });
+        fs::remove_dir_all(root).expect("transcript fixture root should be removed");
+    }
+
+    fn live_transcript_fixture(
+        name: &str,
+    ) -> (
+        PathBuf,
+        audit::SessionAuditRecord,
+        TranscriptEventSource,
+        PathBuf,
+    ) {
+        let root = unique_temp_dir(name);
+        let record = audit::prepare_session_audit_record(
+            "session-123",
+            &SessionSpec {
+                audit_root: root.clone(),
+                ..test_session_spec()
+            },
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: Some("issue-162".to_string()),
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let source = TranscriptEventSource::from_record(&record);
+        let events_path = source.event_file_path_for_work_unit("issue-162");
+        (root, record, source, events_path)
+    }
 
     fn reconcile_startup_resources_for_tests() -> Result<StartupReconciliationReport, RunnerError> {
         reconcile_startup_resources(TEST_DAEMON_INSTANCE_ID)

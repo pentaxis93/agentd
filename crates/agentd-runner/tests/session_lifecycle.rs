@@ -57,6 +57,32 @@ fn wait_for_session_record_dir(audit_root: &Path, agent_name: &str, timeout: Dur
     }
 }
 
+fn nested_transcript_event_files(transcript_dir: &Path) -> Vec<PathBuf> {
+    let mut event_files = Vec::new();
+    collect_nested_transcript_event_files(transcript_dir, &mut event_files);
+    event_files.sort();
+    event_files
+}
+
+fn collect_nested_transcript_event_files(path: &Path, event_files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries {
+        let entry = entry.expect("transcript directory entry should be readable");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_nested_transcript_event_files(&path, event_files);
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("events.jsonl")
+            && path
+                .components()
+                .any(|component| component.as_os_str() == std::ffi::OsStr::new("deployments"))
+        {
+            event_files.push(path);
+        }
+    }
+}
+
 fn write_methodology_manifest(path: &Path, artifact_types: &[&str]) {
     let mut manifest = String::from("name = \"test-methodology\"\n");
     for artifact_type in artifact_types {
@@ -399,6 +425,79 @@ fn executes_work_mode_against_injected_work_unit_artifact() {
     )
     .expect("transcript manifest should be valid json");
     assert_eq!(transcript_manifest["coverage"], "full");
+
+    let session_id = record_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("session record dir should be named by the session id");
+    let observed_transcript_env = fs::read_to_string(record_dir.join("runa/transcript-env.log"))
+        .expect("fake runa should record the post-gosu process transcript environment");
+    assert!(
+        observed_transcript_env.contains("deployment=agentd-"),
+        "runa run must observe agentd-owned deployment after gosu: {observed_transcript_env}"
+    );
+    assert!(
+        observed_transcript_env.contains(&format!("run_id={session_id}\n")),
+        "runa run must observe the agentd session id after gosu: {observed_transcript_env}"
+    );
+    let event_files = nested_transcript_event_files(&record_dir.join("agentd/transcript"));
+    assert_eq!(
+        event_files.len(),
+        2,
+        "resolving and scoped runa events should share one agentd-owned run segment: {event_files:?}"
+    );
+    let observed_deployment = observed_transcript_env
+        .lines()
+        .find_map(|line| line.strip_prefix("deployment="))
+        .expect("fake runa should record observed deployment");
+    let mut work_unit_components = Vec::new();
+    for event_path in &event_files {
+        let path_components = event_path
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let deployment_component_index = path_components
+            .iter()
+            .position(|component| component == "deployments")
+            .expect("nested transcript event path should include deployments component")
+            + 1;
+        let work_unit_component_index = path_components
+            .iter()
+            .position(|component| component == "work-units")
+            .expect("nested transcript event path should include work-units component")
+            + 1;
+        let run_component_index = path_components
+            .iter()
+            .position(|component| component == "runs")
+            .expect("nested transcript event path should include runs component")
+            + 1;
+        work_unit_components.push(
+            path_components
+                .get(work_unit_component_index)
+                .expect("nested transcript event path should name work-unit component")
+                .clone(),
+        );
+        assert_eq!(
+            path_components
+                .get(deployment_component_index)
+                .map(String::as_str),
+            Some(observed_deployment),
+            "runa events must land under the deployment observed by the post-gosu runa process: {}",
+            event_path.display()
+        );
+        assert_eq!(
+            path_components.get(run_component_index),
+            Some(&session_id.to_string()),
+            "runa must honor agentd's session-stable RUNA_TRANSCRIPT_RUN_ID: {}",
+            event_path.display()
+        );
+    }
+    work_unit_components.sort();
+    assert_eq!(
+        work_unit_components,
+        ["76".to_string(), "_unscoped".to_string()],
+        "work-mode execution should include resolving and scoped transcript event paths"
+    );
 
     fixture.assert_no_runner_container_left_behind();
     fixture.assert_no_runner_secret_left_behind();
@@ -1098,8 +1197,14 @@ fn persists_session_transcript_under_agentd_audit_dir() {
     assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
 
     let transcript_dir = fixture.only_session_record_dir().join("agentd/transcript");
-    let events = fs::read_to_string(transcript_dir.join("events.jsonl"))
-        .expect("structured transcript events should persist");
+    assert!(
+        !transcript_dir.join("events.jsonl").exists(),
+        "agentd should not use a flat transcript event stream"
+    );
+    let event_files = nested_transcript_event_files(&transcript_dir);
+    assert_eq!(event_files.len(), 1, "expected one nested runa event file");
+    let events =
+        fs::read_to_string(&event_files[0]).expect("structured transcript events should persist");
     assert!(events.contains("\"kind\":\"agent_input\""), "{events}");
     assert!(events.contains("\"kind\":\"agent_exit\""), "{events}");
 
@@ -1110,13 +1215,14 @@ fn persists_session_transcript_under_agentd_audit_dir() {
     .expect("transcript manifest should be json");
     assert_eq!(manifest["schema_version"], 1);
     assert_eq!(manifest["coverage"], "missing_mcp_events");
+    assert_eq!(manifest["event_schema_versions"], serde_json::json!([2]));
 
     let markdown = fs::read_to_string(transcript_dir.join("transcript.md"))
         .expect("human-readable transcript should persist");
     assert!(markdown.contains("# Session Transcript"), "{markdown}");
     assert!(markdown.contains("agent_input"), "{markdown}");
 
-    let events_mode = fs::metadata(transcript_dir.join("events.jsonl"))
+    let events_mode = fs::metadata(&event_files[0])
         .expect("events permissions should exist")
         .permissions()
         .mode();
@@ -1178,6 +1284,7 @@ fn finalizes_session_after_runtime_restricts_transcript_directory_permissions() 
         serde_json::from_str(&manifest_result.expect("transcript manifest should persist"))
             .expect("transcript manifest should be json");
     assert_eq!(manifest["coverage"], "missing_mcp_events");
+    assert_eq!(manifest["event_schema_versions"], serde_json::json!([2]));
 
     let markdown = fs::read_to_string(transcript_dir.join("transcript.md"))
         .expect("human-readable transcript should persist");
@@ -1245,17 +1352,17 @@ fn finalizes_session_after_runtime_restricts_events_jsonl_permissions() {
 
     let record_dir = fixture.only_session_record_dir();
     let transcript_dir = record_dir.join("agentd/transcript");
-    let events_path = transcript_dir.join("events.jsonl");
     let manifest_result = fs::read_to_string(transcript_dir.join("manifest.json"));
-    if manifest_result.is_err() {
-        let _ = fs::set_permissions(&events_path, fs::Permissions::from_mode(0o644));
-    }
     let manifest: Value =
         serde_json::from_str(&manifest_result.expect("transcript manifest should persist"))
             .expect("transcript manifest should be json");
     assert_eq!(manifest["coverage"], "missing_mcp_events");
+    assert_eq!(manifest["event_schema_versions"], serde_json::json!([2]));
 
-    let events = fs::read_to_string(&events_path).expect("structured transcript should persist");
+    let event_files = nested_transcript_event_files(&transcript_dir);
+    assert_eq!(event_files.len(), 1, "expected one nested runa event file");
+    let events_path = &event_files[0];
+    let events = fs::read_to_string(events_path).expect("structured transcript should persist");
     assert!(events.contains("\"kind\":\"agent_input\""), "{events}");
 
     let session: Value = serde_json::from_str(
@@ -1265,7 +1372,7 @@ fn finalizes_session_after_runtime_restricts_events_jsonl_permissions() {
     .expect("session metadata should be json");
     assert_eq!(session["outcome"], "success");
 
-    let events_mode = fs::metadata(&events_path)
+    let events_mode = fs::metadata(events_path)
         .expect("events metadata should exist")
         .permissions()
         .mode()
@@ -2440,6 +2547,27 @@ exit 97
 const RUNA_STUB: &str = r#"#!/bin/sh
 set -eu
 
+transcript_events_file() {
+    work_unit_component="${1:-_unscoped}"
+    stage_component="${2:-stage}"
+    if [ -n "${RUNA_TRANSCRIPT_RUN_ID:-}" ]; then
+        run_id="${RUNA_TRANSCRIPT_RUN_ID}"
+    else
+        run_id="run-${stage_component}-1"
+    fi
+    printf '%s/deployments/%s/work-units/%s/runs/%s/events.jsonl' \
+        "${RUNA_TRANSCRIPT_DIR:?}" \
+        "${RUNA_TRANSCRIPT_DEPLOYMENT:?}" \
+        "$work_unit_component" \
+        "$run_id"
+}
+
+append_transcript_event() {
+    event_file="$(transcript_events_file "$1" "$2")"
+    mkdir -p "$(dirname "$event_file")"
+    printf '%s\n' "$3" >> "$event_file"
+}
+
 subcommand="${1:-}"
         if [ "$#" -gt 0 ]; then
             shift
@@ -2497,10 +2625,10 @@ EOF
                     else
                         printf 'run --agent-command -- %s\n' "$*" >> .runa/calls.log
                     fi
+                    printf 'deployment=%s\nrun_id=%s\n' "${RUNA_TRANSCRIPT_DEPLOYMENT:-}" "${RUNA_TRANSCRIPT_RUN_ID:-}" > .runa/transcript-env.log
                     if [ -n "${RUNA_TRANSCRIPT_DIR:-}" ]; then
-                        mkdir -p "${RUNA_TRANSCRIPT_DIR}"
-                        printf '{"schema_version":1,"source":"runa","kind":"agent_input","content":"stub prompt"}\n' >> "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
-                        printf '{"schema_version":1,"source":"runa","kind":"agent_exit","success":true}\n' >> "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
+                        append_transcript_event "$work_unit" "specify" '{"schema_version":2,"source":"runa","kind":"agent_input","content":"stub prompt"}'
+                        append_transcript_event "$work_unit" "land" '{"schema_version":2,"source":"runa","kind":"agent_exit","success":true}'
                     fi
                     exec "$@"
                     ;;
@@ -2644,6 +2772,26 @@ fn write_http_response(stream: &mut TcpStream, status: &str, body: &[u8], head_o
 const SITE_BUILDER_STUB: &str = r#"#!/bin/sh
 set -eu
 
+transcript_events_file() {
+    work_unit_component="${AGENTD_WORK_UNIT:-_unscoped}"
+    if [ -n "${RUNA_TRANSCRIPT_RUN_ID:-}" ]; then
+        run_id="${RUNA_TRANSCRIPT_RUN_ID}"
+    else
+        run_id="run-agent-command-1"
+    fi
+    printf '%s/deployments/%s/work-units/%s/runs/%s/events.jsonl' \
+        "${RUNA_TRANSCRIPT_DIR:?}" \
+        "${RUNA_TRANSCRIPT_DEPLOYMENT:?}" \
+        "$work_unit_component" \
+        "$run_id"
+}
+
+append_transcript_event() {
+    event_file="$(transcript_events_file)"
+    mkdir -p "$(dirname "$event_file")"
+    printf '%s\n' "$1" >> "$event_file"
+}
+
 command_name="$1"
 shift
 
@@ -2684,7 +2832,7 @@ case "$command_name" in
         fi
 
         if [ "${SESSION_TEST_BEHAVIOR:-}" = "restrict-transcript-events" ]; then
-            chmod 000 "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
+            chmod 000 "$(transcript_events_file)"
             exit 0
         fi
 
@@ -2726,7 +2874,7 @@ case "$command_name" in
             printf '{"status":"landed"}\n' > "${HOME}/repo/.runa/workspace/completion-record/land.json"
             printf '{"events":[{"protocol":"specify","artifact":"behavior-contract","postcondition":"passed"},{"protocol":"plan","artifact":"implementation-plan","postcondition":"passed"},{"protocol":"implement","artifact":"patch","postcondition":"passed"},{"protocol":"verify","artifact":"test-evidence","postcondition":"passed"},{"protocol":"document","artifact":"documentation-record","postcondition":"passed"},{"protocol":"submit","artifact":"completion-record","postcondition":"passed"},{"protocol":"land","artifact":"completion-record","postcondition":"passed"}]}\n' > "${HOME}/repo/.runa/store/executions/0001.json"
             if [ -n "${RUNA_TRANSCRIPT_DIR:-}" ]; then
-                printf '{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"take"}\n' >> "${RUNA_TRANSCRIPT_DIR}/events.jsonl"
+                append_transcript_event '{"schema_version":2,"source":"runa-mcp","kind":"tool_call","protocol":"take"}'
             fi
             exit 0
         fi

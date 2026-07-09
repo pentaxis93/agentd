@@ -18,6 +18,7 @@ use crate::session_paths::{
     session_home_dir, session_internal_audit_dir, session_internal_audit_runa_dir,
     session_repo_dir, session_repo_runa_dir, session_transcript_mount_dir,
 };
+use crate::transcript::{TRANSCRIPT_DEPLOYMENT_ENV, TRANSCRIPT_RUN_ID_ENV, TranscriptIdentity};
 use crate::types::{BindMount, RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use crate::validation::{
     REPO_TOKEN_ENV, RepoUrlKind, TRANSCRIPT_DIR_ENV, TRANSCRIPT_REDACT_ENV, repo_url_kind,
@@ -185,6 +186,7 @@ pub(crate) fn cleanup_container(container_name: &str) -> Result<(), RunnerError>
 fn build_container_script(
     spec: &SessionSpec,
     invocation: &SessionInvocation,
+    transcript_identity: &TranscriptIdentity,
     resolved_input: Option<&ResolvedInvocationInput>,
 ) -> String {
     let username = &spec.agent_name;
@@ -257,19 +259,12 @@ fn build_container_script(
     } else {
         script.push_str("\nunset AGENTD_WORK_UNIT");
     }
-    script.push_str("\nexport ");
-    script.push_str(TRANSCRIPT_DIR_ENV);
-    script.push('=');
-    script.push_str(&shell_quote(
-        &session_transcript_mount_dir().display().to_string(),
-    ));
     let redact_env = transcript_redact_environment(spec, invocation);
-    script.push_str("\nexport ");
-    script.push_str(TRANSCRIPT_REDACT_ENV);
-    script.push('=');
-    script.push_str(&shell_quote(&redact_env));
+    let transcript_env = transcript_env_command(transcript_identity, &redact_env);
     script.push_str("\ngosu ");
     script.push_str(&shell_quote(&user_group));
+    script.push(' ');
+    script.push_str(&transcript_env);
     script.push_str(" runa init --methodology ");
     script.push_str(&shell_quote(METHODOLOGY_MANIFEST_PATH));
     if let Some(resolved_input) = resolved_input {
@@ -286,6 +281,8 @@ fn build_container_script(
     }
     script.push_str("\nexec gosu ");
     script.push_str(&shell_quote(&user_group));
+    script.push(' ');
+    script.push_str(&transcript_env);
     script.push_str(" runa run");
     script.push_str(" --agent-command -- ");
     script.push_str(&shell_join(&spec.agent_command));
@@ -334,6 +331,28 @@ fn append_inline_input_materialization(
     script.push_str(&shell_quote(user_group));
     script.push_str(" /bin/sh -c ");
     script.push_str(&shell_quote(&write_command));
+}
+
+fn transcript_env_command(transcript_identity: &TranscriptIdentity, redact_env: &str) -> String {
+    let mut command = String::from("env ");
+    command.push_str(TRANSCRIPT_DIR_ENV);
+    command.push('=');
+    command.push_str(&shell_quote(
+        &session_transcript_mount_dir().display().to_string(),
+    ));
+    command.push(' ');
+    command.push_str(TRANSCRIPT_DEPLOYMENT_ENV);
+    command.push('=');
+    command.push_str(&shell_quote(transcript_identity.deployment()));
+    command.push(' ');
+    command.push_str(TRANSCRIPT_RUN_ID_ENV);
+    command.push('=');
+    command.push_str(&shell_quote(transcript_identity.run_id()));
+    command.push(' ');
+    command.push_str(TRANSCRIPT_REDACT_ENV);
+    command.push('=');
+    command.push_str(&shell_quote(redact_env));
+    command
 }
 
 fn build_home_ownership_command(
@@ -522,7 +541,12 @@ fn build_create_container_args(
     args.push("/bin/sh".to_string());
     args.push(spec.base_image.clone());
     args.push("-lc".to_string());
-    args.push(build_container_script(spec, invocation, resolved_input));
+    args.push(build_container_script(
+        spec,
+        invocation,
+        &resources.audit_record.transcript_identity,
+        resolved_input,
+    ));
 
     args
 }

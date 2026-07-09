@@ -316,6 +316,11 @@ The file stem becomes the artifact id, so the file stem must match
 it materializes a target-bearing `intent` seed and launches unscoped `runa run`
 so runa resolves the reference fail-closed before scoped work begins.
 
+`agentd wish` and `agentd run` stream live session progress to the invoking
+terminal while the daemon runs the session. The default `--progress summary`
+prints concise transcript event names before the terminal `session <status>`
+line; `--progress full` includes the session id and raw transcript event line.
+
 `agentd run` does not read `agentd.toml`. The client connects to the daemon by
 either:
 
@@ -381,9 +386,13 @@ persists on the host under the resolved audit root
 `<audit_root>/<agent>/<session_id>/`, with runa state in `runa/`, agentd
 metadata in `agentd/session.json`, and transcript artifacts in
 `agentd/transcript/`. Transcript artifacts include structured JSON Lines events
-at `events.jsonl`, a human-readable `transcript.md`, and `manifest.json` with
-coverage of `full`, `missing_mcp_events`, `no_events`, or
-`finalization_failed`. Full MCP tool-call coverage depends on the agent runtime
+under `deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl`,
+a human-readable `transcript.md`, and `manifest.json` with coverage of `full`,
+`missing_mcp_events`, `no_events`, or `finalization_failed`. agentd injects the
+deployment and run id that address the runa event store, and the manifest records
+the runa event schema versions it assembled. Nested transcript reads refuse
+symlinked ancestors below `agentd/transcript` rather than following them outside
+the audit record. Full MCP tool-call coverage depends on the agent runtime
 launching `runa-mcp`; otherwise the transcript still records the observable runa
 boundary without claiming MCP events that never occurred.
 

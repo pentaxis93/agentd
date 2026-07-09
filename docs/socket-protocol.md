@@ -15,11 +15,12 @@ integration surfaces are the CLI and the audit record
 ## Framing and connection lifecycle
 
 - Transport: `SOCK_STREAM` Unix domain socket.
-- Framing: newline-delimited JSON — one request line, one response line.
-- Lifecycle: connect → write one request + `\n` → read one response line →
-  connection closes. One session trigger per connection; the response is
-  not written until the session reaches a terminal outcome, so `run`
-  connections stay open for the session's duration.
+- Framing: newline-delimited JSON — one request line, followed by one or
+  more response lines.
+- Lifecycle: connect → write one request + `\n` → read response lines until
+  one terminal `session_outcome` or `error` line → connection closes. One
+  session trigger per connection; `run` connections stay open for the
+  session's duration and may carry progress lines before the terminal line.
 - An empty connection (EOF before a line) is ignored. A malformed request
   line gets an `error` response.
 
@@ -58,6 +59,21 @@ target prompt; `agentd run --intent` has no target flag.
 
 `{"type": "pong"}` — answer to `ping`.
 
+`{"type": "progress", "progress": {"stage": "...", ...}}` — non-terminal
+live progress for a run request. `dispatch_started` is a start marker;
+`transcript_event` carries execution-phase events from the running session's
+same nested runa event source that sealed audit finalization reads:
+`agentd/transcript/deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl`.
+`agentd wish` and `agentd run` render these frames in the invoking terminal
+while they wait for the terminal outcome; `--progress summary` prints concise
+event names and `--progress full` includes the raw transcript event line.
+Progress delivery is best-effort: oversized transcript records and progress
+frames that cannot fit without preserving room for the terminal response are
+dropped whole. The daemon never emits partial progress JSON frames, and the
+terminal `session_outcome` or terminal `error` remains the authoritative
+completion response. CLI rendering control-escapes untrusted request and
+transcript fields before they reach the operator's terminal.
+
 `{"type": "error", "message": "..."}` — the request was rejected before a
 session outcome existed (malformed request, unknown agent, dispatch
 failure).
@@ -66,6 +82,22 @@ failure).
 session ran to a terminal outcome. A `session_outcome` response means the
 transport and dispatch succeeded; the work may still have failed — read
 `status`.
+
+### Progress stages
+
+`dispatch_started` means the daemon has accepted the run request on the
+operator connection and is dispatching it into session execution:
+
+```json
+{"type":"progress","progress":{"stage":"dispatch_started","agent":"site-builder","work_unit":"issue-42","input_present":false}}
+```
+
+`transcript_event` means the running session appended a structured transcript
+event that the daemon forwarded before the terminal outcome:
+
+```json
+{"type":"progress","progress":{"stage":"transcript_event","session_id":"7f5a1c2d9e0b3a44","line":"{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"...\"}"}}
+```
 
 ## Outcome statuses
 

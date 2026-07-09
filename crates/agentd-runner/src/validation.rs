@@ -9,6 +9,7 @@
 use crate::input::INVOCATION_INPUT_MOUNT_PATH;
 use crate::naming::is_daemon_instance_id;
 use crate::session_paths::{session_home_dir, session_internal_agentd_dir, session_repo_dir};
+use crate::transcript::{TRANSCRIPT_DEPLOYMENT_ENV, TRANSCRIPT_RUN_ID_ENV};
 use crate::types::{
     AgentNameValidationError, BindMount, EnvironmentNameValidationError, InvocationInput,
     MountOverlapError, MountTargetValidationError, RunnerError, SessionInvocation, SessionSpec,
@@ -199,7 +200,8 @@ fn validate_work_mode_input(work_unit: &str, input: &InvocationInput) -> Result<
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
 /// runner-managed names such as `AGENT_NAME`, `GROUNDWORK_FORGE_TYPE`,
-/// `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`, and
+/// `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`,
+/// `RUNA_TRANSCRIPT_DEPLOYMENT`, `RUNA_TRANSCRIPT_RUN_ID`, and
 /// `RUNA_TRANSCRIPT_REDACT_ENV`. Used both by
 /// [`run_session`](crate::run_session) during spec validation and by the
 /// configuration layer for credential name validation.
@@ -404,6 +406,8 @@ fn is_reserved_environment_name(name: &str) -> bool {
             | WORK_UNIT_ENV
             | REPO_TOKEN_ENV
             | TRANSCRIPT_DIR_ENV
+            | TRANSCRIPT_DEPLOYMENT_ENV
+            | TRANSCRIPT_RUN_ID_ENV
             | TRANSCRIPT_REDACT_ENV
     )
 }
@@ -518,6 +522,8 @@ mod tests {
             WORK_UNIT_ENV,
             REPO_TOKEN_ENV,
             "RUNA_TRANSCRIPT_DIR",
+            "RUNA_TRANSCRIPT_DEPLOYMENT",
+            "RUNA_TRANSCRIPT_RUN_ID",
             "RUNA_TRANSCRIPT_REDACT_ENV",
         ] {
             let error = validate_spec(&SessionSpec {

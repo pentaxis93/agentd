@@ -1,4 +1,7 @@
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -9,13 +12,33 @@ use std::time::{Duration, Instant};
 use agentd::config::{Config, ConfigError};
 use agentd::daemon::run_daemon_until_shutdown_with_reconciler;
 use agentd::{
-    ClientError, DaemonError, RunRequest, RunnerSessionExecutor, SessionExecutor, request_run,
+    ClientError, DaemonError, LiveObservationLevel, RunRequest, RunnerSessionExecutor,
+    SessionExecutor, request_run, request_run_with_live_observation,
 };
 use agentd_runner::InvocationInput;
 use agentd_runner::{
-    RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+    RunnerError, SessionInvocation, SessionOutcome, SessionProgressEvent, SessionProgressObserver,
+    SessionSpec, StartupReconciliationReport,
 };
 use serde_json::json;
+
+struct ChannelWriter {
+    tx: mpsc::Sender<String>,
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf).to_string();
+        self.tx
+            .send(text)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "receiver closed"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -32,6 +55,7 @@ impl SessionExecutor for FixedOutcomeExecutor {
         &self,
         _spec: SessionSpec,
         _invocation: SessionInvocation,
+        _progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         Ok(self.outcome.clone())
     }
@@ -61,6 +85,7 @@ impl SessionExecutor for RecordingInvocationExecutor {
         &self,
         _spec: SessionSpec,
         invocation: SessionInvocation,
+        _progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         self.invocations
             .lock()
@@ -75,12 +100,87 @@ struct BlockingFirstRunExecutor {
     state: Arc<BlockingFirstRunState>,
     first_outcome: SessionOutcome,
     later_outcome: SessionOutcome,
+    first_progress_line: Option<String>,
 }
 
 struct BlockingFirstRunState {
     calls: AtomicUsize,
     first_started: (Mutex<bool>, Condvar),
     first_released: (Mutex<bool>, Condvar),
+}
+
+const SATURATING_PROGRESS_EVENTS: usize = 256;
+const SMALL_SOCKET_RECEIVE_BUFFER_BYTES: libc::c_int = 4096;
+// This reproduces the rejected dade8ed writer timeout path; production no longer has it.
+const LEGACY_PROGRESS_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+struct BlockingBurstProgressExecutor {
+    state: Arc<BlockingBurstProgressState>,
+    progress_line: String,
+}
+
+struct BlockingBurstProgressState {
+    progress_emitted: (Mutex<bool>, Condvar),
+    released: AtomicBool,
+}
+
+impl BlockingBurstProgressExecutor {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(BlockingBurstProgressState {
+                progress_emitted: (Mutex::new(false), Condvar::new()),
+                released: AtomicBool::new(false),
+            }),
+            progress_line: format!(
+                r#"{{"schema_version":1,"source":"runa","kind":"agent_input","content":"{}"}}"#,
+                "x".repeat(96 * 1024)
+            ),
+        }
+    }
+
+    fn wait_for_progress_to_emit(&self) {
+        let (lock, cvar) = &self.state.progress_emitted;
+        let emitted = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (emitted, _) = cvar
+            .wait_timeout_while(emitted, Duration::from_secs(10), |emitted| !*emitted)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(*emitted, "timed out waiting for progress burst");
+    }
+
+    fn release(&self) {
+        self.state.released.store(true, Ordering::Release);
+    }
+}
+
+impl SessionExecutor for BlockingBurstProgressExecutor {
+    fn run_session(
+        &self,
+        _spec: SessionSpec,
+        _invocation: SessionInvocation,
+        progress: &dyn SessionProgressObserver,
+    ) -> Result<SessionOutcome, RunnerError> {
+        let mut index = 0_usize;
+        while !self.state.released.load(Ordering::Acquire) {
+            progress.observe(SessionProgressEvent::TranscriptEvent {
+                session_id: format!("fake-session-{index}"),
+                line: self.progress_line.clone(),
+            });
+            index += 1;
+
+            if index == SATURATING_PROGRESS_EVENTS {
+                let (emitted_lock, emitted_cvar) = &self.state.progress_emitted;
+                let mut emitted = emitted_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *emitted = true;
+                emitted_cvar.notify_all();
+            }
+
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(SessionOutcome::Success { exit_code: 0 })
+    }
 }
 
 impl BlockingFirstRunExecutor {
@@ -93,7 +193,13 @@ impl BlockingFirstRunExecutor {
             }),
             first_outcome,
             later_outcome,
+            first_progress_line: None,
         }
+    }
+
+    fn with_first_progress_line(mut self, line: &str) -> Self {
+        self.first_progress_line = Some(line.to_string());
+        self
     }
 
     fn wait_for_first_run_to_start(&self) {
@@ -119,6 +225,7 @@ impl SessionExecutor for BlockingFirstRunExecutor {
         &self,
         _spec: SessionSpec,
         _invocation: SessionInvocation,
+        progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
         let call_index = self.state.calls.fetch_add(1, Ordering::AcqRel);
         if call_index == 0 {
@@ -129,6 +236,13 @@ impl SessionExecutor for BlockingFirstRunExecutor {
             *started = true;
             started_cvar.notify_all();
             drop(started);
+
+            if let Some(line) = &self.first_progress_line {
+                progress.observe(SessionProgressEvent::TranscriptEvent {
+                    session_id: "fake-session-1".to_string(),
+                    line: line.clone(),
+                });
+            }
 
             let (released_lock, released_cvar) = &self.state.first_released;
             let released = released_lock
@@ -207,6 +321,101 @@ fn wait_for_path_removal(path: &std::path::Path) {
     panic!("timed out waiting for removal of {}", path.display());
 }
 
+fn set_small_receive_buffer(stream: &UnixStream) {
+    let size = SMALL_SOCKET_RECEIVE_BUFFER_BYTES;
+    let result = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            (&size as *const libc::c_int).cast(),
+            std::mem::size_of_val(&size) as libc::socklen_t,
+        )
+    };
+    assert_eq!(
+        result,
+        0,
+        "failed to constrain client receive buffer: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+fn write_raw_run_request(client: &mut UnixStream, work_unit: &str) {
+    writeln!(
+        client,
+        "{}",
+        json!({
+            "type": "run",
+            "agent": "site-builder",
+            "repo_url": "https://example.com/repo.git",
+            "work_unit": work_unit,
+            "input": null
+        })
+    )
+    .expect("client request should write");
+}
+
+fn read_response_stream(client: &mut UnixStream) -> Vec<u8> {
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("client read timeout should be set");
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match client.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => response.extend_from_slice(&buffer[..bytes_read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("client timed out before daemon closed the response stream")
+            }
+            Err(error) => panic!("client failed to read daemon response: {error}"),
+        }
+    }
+    response
+}
+
+fn unread_socket_bytes(stream: &UnixStream) -> usize {
+    let mut bytes: libc::c_int = 0;
+    let result = unsafe { libc::ioctl(stream.as_raw_fd(), libc::FIONREAD, &mut bytes) };
+    assert_eq!(
+        result,
+        0,
+        "failed to inspect unread client bytes: {}",
+        std::io::Error::last_os_error()
+    );
+    usize::try_from(bytes).expect("unread byte count should be non-negative")
+}
+
+fn wait_for_backpressured_client(stream: &UnixStream, minimum_unread_bytes: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_observed = 0_usize;
+    let mut stable_since = Instant::now();
+    loop {
+        let unread = unread_socket_bytes(stream);
+        if unread > last_observed {
+            last_observed = unread;
+            stable_since = Instant::now();
+        }
+
+        if last_observed >= minimum_unread_bytes
+            && stable_since.elapsed() >= Duration::from_millis(100)
+        {
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for client receive queue to backpressure the writer; last unread bytes: {last_observed}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn run_daemon_until_shutdown_for_test(
     config: Config,
     executor: impl SessionExecutor + Send + Sync + Clone + 'static,
@@ -257,6 +466,271 @@ fn daemon_reports_run_outcome_back_through_client_request() {
         .join()
         .expect("daemon thread should join")
         .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
+fn client_receives_execution_progress_while_session_is_still_running() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("live-progress");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let executor = BlockingFirstRunExecutor::new(
+        SessionOutcome::Success { exit_code: 0 },
+        SessionOutcome::Success { exit_code: 0 },
+    )
+    .with_first_progress_line(
+        r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
+    );
+    let daemon_executor = executor.clone();
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let client_config = config.clone();
+    let client_request = thread::spawn(move || {
+        let mut writer = ChannelWriter { tx: progress_tx };
+        request_run_with_live_observation(
+            client_config.daemon(),
+            &RunRequest {
+                agent: "site-builder".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
+                work_unit: Some("issue-122".to_string()),
+                input: None,
+            },
+            LiveObservationLevel::Summary,
+            &mut writer,
+        )
+    });
+
+    executor.wait_for_first_run_to_start();
+    let mut progress = String::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !progress.contains("session event: agent_input") {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "execution progress should reach the client before the session completes"
+        );
+        progress.push_str(
+            &progress_rx
+                .recv_timeout(remaining)
+                .expect("execution progress should reach the client before the session completes"),
+        );
+    }
+    assert!(
+        progress.contains("session event: agent_input"),
+        "unexpected progress output: {progress}"
+    );
+    assert!(
+        !client_request.is_finished(),
+        "client should still be waiting for the terminal outcome after progress arrives"
+    );
+
+    executor.release_first_run();
+    assert_eq!(
+        client_request
+            .join()
+            .expect("client request thread should join")
+            .expect("client request should succeed"),
+        SessionOutcome::Success { exit_code: 0 }
+    );
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
+fn client_full_progress_includes_raw_execution_event_detail() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("full-live-progress");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let executor = BlockingFirstRunExecutor::new(
+        SessionOutcome::Success { exit_code: 0 },
+        SessionOutcome::Success { exit_code: 0 },
+    )
+    .with_first_progress_line(
+        r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
+    );
+    let daemon_executor = executor.clone();
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let client_config = config.clone();
+    let client_request = thread::spawn(move || {
+        let mut writer = ChannelWriter { tx: progress_tx };
+        request_run_with_live_observation(
+            client_config.daemon(),
+            &RunRequest {
+                agent: "site-builder".to_string(),
+                repo_url: Some("https://example.com/repo.git".to_string()),
+                work_unit: Some("issue-122".to_string()),
+                input: None,
+            },
+            LiveObservationLevel::Full,
+            &mut writer,
+        )
+    });
+
+    executor.wait_for_first_run_to_start();
+    let mut progress = String::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !progress.contains(r#""content":"working step""#) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "full execution progress should reach the client before the session completes"
+        );
+        progress.push_str(
+            &progress_rx
+                .recv_timeout(remaining)
+                .expect("full execution progress should reach the client before completion"),
+        );
+    }
+    assert!(progress.contains("session_id=fake-session-1"), "{progress}");
+    assert!(
+        !client_request.is_finished(),
+        "client should still be waiting for the terminal outcome after full progress arrives"
+    );
+
+    executor.release_first_run();
+    assert_eq!(
+        client_request
+            .join()
+            .expect("client request thread should join")
+            .expect("client request should succeed"),
+        SessionOutcome::Success { exit_code: 0 }
+    );
+
+    shutdown.store(true, Ordering::Release);
+    handle
+        .join()
+        .expect("daemon thread should join")
+        .expect("daemon should exit cleanly");
+    unsafe {
+        std::env::remove_var("AGENTD_GITHUB_TOKEN");
+    }
+}
+
+#[test]
+fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcome() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unsafe {
+        std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
+    }
+    let runtime_dir = unique_runtime_dir("slow-reading-progress-client");
+    let config = config_in_runtime_dir(&runtime_dir);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let daemon_config = config.clone();
+    let daemon_shutdown = shutdown.clone();
+    let executor = BlockingBurstProgressExecutor::new();
+    let daemon_executor = executor.clone();
+    let handle = thread::spawn(move || {
+        run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
+    });
+    wait_for_path(config.daemon().socket_path());
+
+    let mut client =
+        Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
+    set_small_receive_buffer(client.as_ref().expect("client should exist"));
+    let backpressure_work_unit = format!("issue-122-{}", "w".repeat(112 * 1024));
+    write_raw_run_request(
+        client.as_mut().expect("client should exist"),
+        &backpressure_work_unit,
+    );
+
+    thread::sleep(Duration::from_millis(50));
+
+    executor.wait_for_progress_to_emit();
+    wait_for_backpressured_client(client.as_ref().expect("client should exist"), 200 * 1024);
+
+    shutdown.store(true, Ordering::Release);
+    let (join_tx, join_rx) = mpsc::channel();
+    let joiner = thread::spawn(move || {
+        let result = handle.join().expect("daemon thread should not panic");
+        join_tx
+            .send(result)
+            .expect("daemon join result should send");
+    });
+    executor.release();
+
+    thread::sleep(LEGACY_PROGRESS_WRITE_TIMEOUT + Duration::from_secs(15));
+
+    let mut client = client.take().expect("client should still be connected");
+    let response = read_response_stream(&mut client);
+
+    let response = String::from_utf8(response).expect("daemon response should be utf8 JSONL");
+    assert!(
+        response.ends_with('\n'),
+        "daemon must not emit an unterminated JSONL tail under progress backpressure: last bytes {:?}",
+        response
+            .as_bytes()
+            .iter()
+            .rev()
+            .take(32)
+            .copied()
+            .collect::<Vec<_>>()
+    );
+    let lines: Vec<&str> = response.lines().collect();
+    assert!(
+        !lines.is_empty(),
+        "daemon should write at least the terminal response"
+    );
+    let mut progress_frames = 0_usize;
+    let mut saw_terminal_outcome = false;
+    for line in &lines {
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("daemon must not emit partial JSON frames");
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("progress") => progress_frames += 1,
+            Some("session_outcome") => saw_terminal_outcome = true,
+            other => panic!("unexpected response type after saturated progress writes: {other:?}"),
+        }
+    }
+    assert!(
+        saw_terminal_outcome,
+        "terminal outcome must survive slow-reader progress backpressure; parsed {} lines with {progress_frames} progress frames",
+        lines.len()
+    );
+    assert!(
+        progress_frames < SATURATING_PROGRESS_EVENTS,
+        "slow-reading client should force progress drops, got all {progress_frames} frames"
+    );
+    let join_result = join_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("daemon should join after bounded slow-reader drain");
+    joiner.join().expect("join helper should join");
+    join_result.expect("daemon should exit cleanly");
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");
     }
@@ -704,51 +1178,96 @@ fn daemon_shutdown_waits_for_an_in_flight_run_to_finish() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
     let daemon_shutdown = shutdown.clone();
-    let executor = BlockingFirstRunExecutor::new(
-        SessionOutcome::Success { exit_code: 0 },
-        SessionOutcome::Success { exit_code: 0 },
-    );
+    let executor = BlockingBurstProgressExecutor::new();
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
     });
     wait_for_path(config.daemon().socket_path());
 
-    let client_config = config.clone();
-    let client_request = thread::spawn(move || {
-        request_run(
-            client_config.daemon(),
-            &RunRequest {
-                agent: "site-builder".to_string(),
-                repo_url: Some("https://example.com/repo.git".to_string()),
-                work_unit: Some("shutdown".to_string()),
-                input: None,
-            },
-        )
-    });
-    executor.wait_for_first_run_to_start();
+    let mut client =
+        Some(UnixStream::connect(config.daemon().socket_path()).expect("client should connect"));
+    set_small_receive_buffer(client.as_ref().expect("client should exist"));
+    write_raw_run_request(client.as_mut().expect("client should exist"), "shutdown");
+    executor.wait_for_progress_to_emit();
+    wait_for_backpressured_client(client.as_ref().expect("client should exist"), 128 * 1024);
 
     shutdown.store(true, Ordering::Release);
+    let (join_tx, join_rx) = mpsc::channel();
+    let joiner = thread::spawn(move || {
+        let result = handle.join().expect("daemon thread should not panic");
+        join_tx
+            .send(result)
+            .expect("daemon join result should send");
+    });
 
-    thread::sleep(Duration::from_millis(500));
-    let exited_before_release = handle.is_finished();
+    executor.release();
+    thread::sleep(Duration::from_millis(250));
 
+    let client = client.take().expect("client should still be connected");
+    let (terminal_tx, terminal_rx) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("client read timeout should be set");
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes_read = reader
+                .read_line(&mut line)
+                .expect("client should read daemon JSONL");
+            if bytes_read == 0 {
+                return false;
+            }
+            let value: serde_json::Value =
+                serde_json::from_str(&line).expect("daemon must emit complete JSON frames");
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("session_outcome") {
+                terminal_tx
+                    .send(())
+                    .expect("terminal observation should send");
+                return true;
+            }
+        }
+    });
+
+    let mut daemon_finished_before_terminal = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if terminal_rx.try_recv().is_ok() {
+            break;
+        }
+        match join_rx.try_recv() {
+            Ok(result) => {
+                daemon_finished_before_terminal = Some(result);
+                break;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                panic!("daemon join helper disconnected before reporting a result")
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "terminal outcome should reach the client before the drain bound expires"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let saw_terminal = reader.join().expect("reader thread should join");
+    let daemon_finished_first = daemon_finished_before_terminal.is_some();
+    let daemon_result = match daemon_finished_before_terminal {
+        Some(result) => result,
+        None => join_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("daemon should join after terminal drain"),
+    };
+    joiner.join().expect("join helper should join");
+    daemon_result.expect("daemon should exit cleanly");
+    assert!(saw_terminal, "client should parse the terminal outcome");
     assert!(
-        !exited_before_release,
-        "daemon exited before the in-flight run finished"
-    );
-
-    executor.release_first_run();
-    handle
-        .join()
-        .expect("daemon thread should join")
-        .expect("daemon should exit cleanly");
-    assert_eq!(
-        client_request
-            .join()
-            .expect("client request thread should join")
-            .expect("client request should eventually succeed"),
-        SessionOutcome::Success { exit_code: 0 }
+        !daemon_finished_first,
+        "daemon shutdown completed before the terminal outcome crossed the writer-to-client boundary"
     );
     unsafe {
         std::env::remove_var("AGENTD_GITHUB_TOKEN");

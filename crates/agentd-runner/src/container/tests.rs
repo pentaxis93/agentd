@@ -27,6 +27,11 @@ fn test_audit_record() -> SessionAuditRecord {
         agent: "site-builder".to_string(),
         repo_url: VALID_REMOTE_REPO_URL.to_string(),
         work_unit: None,
+        transcript_identity: crate::transcript::TranscriptIdentity::new(
+            "github",
+            VALID_REMOTE_REPO_URL,
+            "0123456789abcdef",
+        ),
         start_timestamp: "2026-04-16T00:00:00Z".to_string(),
     }
 }
@@ -273,7 +278,12 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
         &invocation,
         None,
     );
-    let expected_script = build_container_script(&spec, &invocation, None);
+    let expected_script = build_container_script(
+        &spec,
+        &invocation,
+        &test_audit_record().transcript_identity,
+        None,
+    );
 
     let image_index = args
         .iter()
@@ -283,6 +293,75 @@ fn create_container_args_pass_shell_flags_after_image_argument() {
     assert_eq!(
         args.get(image_index + 2).map(String::as_str),
         Some(expected_script.as_str())
+    );
+}
+
+#[test]
+fn container_script_exports_agentd_owned_transcript_identity_for_runa() {
+    let spec = SessionSpec {
+        forge_type: "github".to_string(),
+        ..test_session_spec()
+    };
+    let invocation = SessionInvocation {
+        repo_url: "https://example.com/agentd.git".to_string(),
+        repo_token: None,
+        work_unit: Some("issue-162".to_string()),
+        input: None,
+        timeout: None,
+    };
+    let resources = SessionResources {
+        container_name: "agentd-agent-session".to_string(),
+        methodology_staging_dir: PathBuf::from("/tmp/staging"),
+        methodology_mount_source: PathBuf::from("/tmp/staging/methodology"),
+        audit_record: test_audit_record(),
+        audit_mount: PreparedBindMount {
+            source: PathBuf::from("/tmp/staging/audit-runa"),
+            target: PathBuf::from("/home/site-builder/.agentd/audit/runa"),
+            read_only: false,
+            relabel_shared: true,
+        },
+        transcript_mount: PreparedBindMount {
+            source: PathBuf::from("/tmp/staging/transcript"),
+            target: PathBuf::from("/agentd/transcript"),
+            read_only: false,
+            relabel_shared: true,
+        },
+        invocation_input_mount: None,
+        additional_mounts: Vec::new(),
+        environment_secret_bindings: Vec::new(),
+        repo_token_secret_binding: None,
+    };
+
+    let args = build_create_container_args(&resources, &spec, &invocation, None);
+    let script = args
+        .last()
+        .expect("podman create should include shell script");
+    let identity = crate::transcript::TranscriptIdentity::new(
+        &spec.forge_type,
+        &invocation.repo_url,
+        &resources.audit_record.session_id,
+    );
+
+    assert!(
+        script.contains(&format!(
+            "RUNA_TRANSCRIPT_DEPLOYMENT='{}'",
+            identity.deployment()
+        )),
+        "container script should pass agentd-owned deployment identity at the gosu boundary:\n{script}"
+    );
+    assert!(
+        script.contains(&format!("RUNA_TRANSCRIPT_RUN_ID='{}'", identity.run_id())),
+        "container script should pass agentd-owned run id at the gosu boundary:\n{script}"
+    );
+    assert!(
+        script.contains("env RUNA_TRANSCRIPT_DIR='/agentd/transcript'"),
+        "container script should pass transcript root after gosu:\n{script}"
+    );
+    assert!(
+        script.contains(
+            "exec gosu 'site-builder:site-builder' env RUNA_TRANSCRIPT_DIR='/agentd/transcript'"
+        ),
+        "final runa run process should receive transcript env through post-gosu env:\n{script}"
     );
 }
 
@@ -375,6 +454,7 @@ fn build_container_script_terminates_git_clone_options_before_repo_url() {
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 
@@ -392,6 +472,7 @@ fn build_container_script_disables_git_terminal_prompts() {
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 
@@ -418,6 +499,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 
@@ -447,7 +529,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
     assert!(!script.contains("\nchown -R 'myagent:myagent' '/home/myagent'\n"));
     assert!(script.contains("\nexport HOME='/home/myagent'\n"));
     assert!(script.contains(
-        "\ngosu 'myagent:myagent' runa init --methodology '/agentd/methodology/manifest.toml'\n"
+        "\ngosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa init --methodology '/agentd/methodology/manifest.toml'\n"
     ));
     assert!(!script.contains(".runa/config.toml"));
     assert!(script.contains(
@@ -460,7 +542,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
     );
     assert!(
         script.contains(
-            "\nexec gosu 'myagent:myagent' runa run --agent-command -- 'site-builder' 'exec' '--sandbox' 'workspace-write'"
+            "\nexec gosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa run --agent-command -- 'site-builder' 'exec' '--sandbox' 'workspace-write'"
         ),
         "work-unit reference should enter runa's resolving path instead of --work-unit: {script}"
     );
@@ -484,6 +566,7 @@ fn build_container_script_uses_mode_based_audit_mount_writability_without_chown(
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 
@@ -492,9 +575,7 @@ fn build_container_script_uses_mode_based_audit_mount_writability_without_chown(
             "\nln -s '/home/myagent/.agentd/audit/runa' '/home/myagent/repo/.runa'\n\
              export HOME='/home/myagent'\n\
              unset AGENTD_WORK_UNIT\n\
-             export RUNA_TRANSCRIPT_DIR='/agentd/transcript'\n\
-             export RUNA_TRANSCRIPT_REDACT_ENV=''\n\
-             gosu 'myagent:myagent' runa init"
+             gosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa init"
         ),
         "audit mount root should rely on host-side mode setup before runa init: {script}"
     );
@@ -518,6 +599,7 @@ fn build_container_script_materializes_invocation_input_without_audit_workspace_
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         Some(&ResolvedInvocationInput {
             artifact_type: "intent".to_string(),
             artifact_id: "operator-input".to_string(),
@@ -552,6 +634,7 @@ fn build_container_script_materializes_work_unit_input_before_work_mode_run() {
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         Some(&ResolvedInvocationInput {
             artifact_type: "work-unit".to_string(),
             artifact_id: "76".to_string(),
@@ -623,6 +706,7 @@ fn build_container_script_uses_find_prune_to_reown_home_without_touching_mount_t
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 
@@ -669,6 +753,7 @@ fn build_container_script_does_not_emit_intermediate_home_chown_commands() {
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 
@@ -696,13 +781,14 @@ fn build_container_script_unsets_work_unit_when_invocation_omits_it() {
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 
     assert!(script.contains("\nexport HOME='/home/myagent'\n"));
     assert!(script.contains("\nunset AGENTD_WORK_UNIT\n"));
     assert!(script.contains(
-        "\nexec gosu 'myagent:myagent' runa run --agent-command -- 'site-builder' 'exec'"
+        "\nexec gosu 'myagent:myagent' env RUNA_TRANSCRIPT_DIR='/agentd/transcript' RUNA_TRANSCRIPT_DEPLOYMENT='agentd-2C6C759AB37A9E75FEB2499655C2FD69300DC8BFCB5B57357AB19BAD66BDBBB6' RUNA_TRANSCRIPT_RUN_ID='0123456789abcdef' RUNA_TRANSCRIPT_REDACT_ENV='' runa run --agent-command -- 'site-builder' 'exec'"
     ));
 }
 
@@ -813,6 +899,7 @@ fn build_container_script_runs_ssh_clone_as_session_user_with_session_home() {
             input: None,
             timeout: None,
         },
+        &test_audit_record().transcript_identity,
         None,
     );
 

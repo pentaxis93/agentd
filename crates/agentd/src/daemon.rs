@@ -1,30 +1,37 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, TryLockError, mpsc};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use agentd_runner::{
-    RunnerError, SessionOutcome, StartupReconciliationReport, reconcile_startup_resources,
+    RunnerError, SessionOutcome, SessionProgressEvent, StartupReconciliationReport,
+    reconcile_startup_resources,
 };
 
 use crate::audit_root::prepare_audit_root;
 use crate::config::{Config, ConfigError};
-use crate::protocol::{RequestMessage, ResponseMessage};
+use crate::dispatch::dispatch_run_after_preflight;
+use crate::protocol::{ProgressMessage, RequestMessage, ResponseMessage};
 use crate::scheduler::{join_scheduler_thread, spawn_scheduler_thread};
-use crate::{DispatchError, RunRequest, SessionExecutor, dispatch_run};
+use crate::{DispatchError, RunRequest, SessionExecutor};
 
 const ACCEPT_TIMEOUT: Duration = Duration::from_millis(100);
 const RUNTIME_DIR_MODE: u32 = 0o700;
 const SOCKET_MODE: u32 = 0o600;
 const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
+const MAX_PROGRESS_FRAME_BYTES: usize = 128 * 1024;
+const PROGRESS_QUEUE_CAPACITY: usize = 64;
+const PROGRESS_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -81,6 +88,15 @@ pub enum ClientError {
     Io(io::Error),
     Protocol(serde_json::Error),
     Server { message: String },
+}
+
+/// Client-side rendering level for live session observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveObservationLevel {
+    /// Print concise lifecycle markers while waiting for the terminal outcome.
+    Summary,
+    /// Print lifecycle markers with every field carried by the progress frame.
+    Full,
 }
 
 impl fmt::Display for ClientError {
@@ -341,19 +357,41 @@ pub fn request_run(
     socket_path: impl AsRef<Path>,
     request: &RunRequest,
 ) -> Result<SessionOutcome, ClientError> {
+    request_run_inner::<io::Sink>(socket_path.as_ref(), request, None)
+}
+
+/// Trigger a run and render daemon progress messages while waiting.
+pub fn request_run_with_live_observation<W: Write>(
+    socket_path: impl AsRef<Path>,
+    request: &RunRequest,
+    level: LiveObservationLevel,
+    writer: &mut W,
+) -> Result<SessionOutcome, ClientError> {
+    request_run_inner(socket_path.as_ref(), request, Some((level, writer)))
+}
+
+fn request_run_inner<W: Write>(
+    socket_path: &Path,
+    request: &RunRequest,
+    observer: Option<(LiveObservationLevel, &mut W)>,
+) -> Result<SessionOutcome, ClientError> {
     match send_request(
-        socket_path.as_ref(),
+        socket_path,
         &RequestMessage::Run {
             agent: request.agent.clone(),
             repo_url: request.repo_url.clone(),
             work_unit: request.work_unit.clone(),
             input: request.input.clone(),
         },
+        observer,
     )? {
         ResponseMessage::SessionOutcome { outcome } => Ok(outcome.into()),
         ResponseMessage::Error { message } => Err(ClientError::Server { message }),
         ResponseMessage::Pong => Err(ClientError::Server {
             message: "unexpected pong from daemon".to_string(),
+        }),
+        ResponseMessage::Progress { .. } => Err(ClientError::Server {
+            message: "daemon closed the connection before reporting a terminal outcome".to_string(),
         }),
     }
 }
@@ -373,14 +411,15 @@ pub(crate) fn request_run_without_waiting(
     )
 }
 
-fn send_request(
+fn send_request<W: Write>(
     socket_path: &Path,
     request: &RequestMessage,
+    observer: Option<(LiveObservationLevel, &mut W)>,
 ) -> Result<ResponseMessage, ClientError> {
     let mut stream = connect_to_daemon(socket_path)?;
     write_request(&mut stream, request)?;
 
-    read_response(stream)
+    read_terminal_response(stream, observer)
 }
 
 fn send_request_without_response(
@@ -416,17 +455,132 @@ fn write_request(stream: &mut UnixStream, request: &RequestMessage) -> Result<()
     Ok(())
 }
 
-fn read_response(stream: UnixStream) -> Result<ResponseMessage, ClientError> {
+fn read_terminal_response<W: Write>(
+    stream: UnixStream,
+    mut observer: Option<(LiveObservationLevel, &mut W)>,
+) -> Result<ResponseMessage, ClientError> {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line)?;
-    if bytes_read == 0 {
-        return Err(ClientError::Server {
-            message: "daemon closed the connection without a response".to_string(),
-        });
-    }
+    let mut saw_message = false;
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            let message = if saw_message {
+                "daemon closed the connection before reporting a terminal outcome"
+            } else {
+                "daemon closed the connection without a response"
+            };
+            return Err(ClientError::Server {
+                message: message.to_string(),
+            });
+        }
+        saw_message = true;
 
-    Ok(serde_json::from_str(&line)?)
+        let response = serde_json::from_str(&line)?;
+        match response {
+            ResponseMessage::Progress { progress } => {
+                if let Some((level, writer)) = observer.as_mut() {
+                    render_progress(progress, *level, &mut **writer)?;
+                }
+            }
+            terminal => return Ok(terminal),
+        }
+    }
+}
+
+fn render_progress<W: Write>(
+    progress: ProgressMessage,
+    level: LiveObservationLevel,
+    writer: &mut W,
+) -> Result<(), ClientError> {
+    writeln!(
+        writer,
+        "{}",
+        render_operator_progress_line(&progress, level)
+    )?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn render_operator_progress_line(
+    progress: &ProgressMessage,
+    level: LiveObservationLevel,
+) -> String {
+    match (progress, level) {
+        (
+            ProgressMessage::DispatchStarted {
+                agent, work_unit, ..
+            },
+            LiveObservationLevel::Summary,
+        ) => {
+            if let Some(work_unit) = work_unit {
+                format!(
+                    "session running: {} ({})",
+                    OperatorField(agent),
+                    OperatorField(work_unit)
+                )
+            } else {
+                format!("session running: {}", OperatorField(agent))
+            }
+        }
+        (
+            ProgressMessage::DispatchStarted {
+                agent,
+                work_unit,
+                input_present,
+            },
+            LiveObservationLevel::Full,
+        ) => format!(
+            "session running: agent={} work_unit={} input={}",
+            OperatorField(agent),
+            work_unit
+                .as_deref()
+                .map(OperatorField)
+                .unwrap_or(OperatorField("-")),
+            if *input_present { "present" } else { "absent" }
+        ),
+        (ProgressMessage::TranscriptEvent { line, .. }, LiveObservationLevel::Summary) => {
+            let summary = summarize_transcript_event(line);
+            format!("session event: {}", OperatorField(&summary))
+        }
+        (ProgressMessage::TranscriptEvent { session_id, line }, LiveObservationLevel::Full) => {
+            format!(
+                "session event: session_id={} {}",
+                OperatorField(session_id),
+                OperatorField(line)
+            )
+        }
+    }
+}
+
+struct OperatorField<'a>(&'a str);
+
+impl fmt::Display for OperatorField<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for character in self.0.chars() {
+            if character.is_control() {
+                for escaped in character.escape_default() {
+                    write!(f, "{escaped}")?;
+                }
+            } else {
+                write!(f, "{character}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn summarize_transcript_event(line: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|event| {
+            event
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .filter(|kind| !kind.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unparsed_event".to_string())
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
@@ -473,7 +627,43 @@ fn handle_connection_inner(
             repo_url,
             work_unit,
             input,
-        } => match dispatch_run(
+        } => {
+            return handle_run_connection(
+                stream, config, executor, agent, repo_url, work_unit, input,
+            );
+        }
+    };
+
+    write_response(&mut stream, &response)
+}
+
+fn handle_run_connection(
+    stream: UnixStream,
+    config: &Config,
+    executor: &impl SessionExecutor,
+    agent: String,
+    repo_url: Option<String>,
+    work_unit: Option<String>,
+    input: Option<agentd_runner::InvocationInput>,
+) -> Result<(), io::Error> {
+    let writer = ProgressWriter::spawn(stream)?;
+    let progress_sink = writer.sink();
+    let response = {
+        let dispatch_progress = ResponseMessage::Progress {
+            progress: ProgressMessage::DispatchStarted {
+                agent: agent.clone(),
+                work_unit: work_unit.clone(),
+                input_present: input.is_some(),
+            },
+        };
+        let write_progress = |event: SessionProgressEvent| {
+            let SessionProgressEvent::TranscriptEvent { session_id, line } = event;
+            let progress = ResponseMessage::Progress {
+                progress: ProgressMessage::TranscriptEvent { session_id, line },
+            };
+            progress_sink.enqueue_progress(progress);
+        };
+        match dispatch_run_after_preflight(
             config,
             &RunRequest {
                 agent: agent.clone(),
@@ -482,6 +672,10 @@ fn handle_connection_inner(
                 input,
             },
             executor,
+            || {
+                progress_sink.enqueue_dispatch_progress(dispatch_progress);
+            },
+            &write_progress,
         ) {
             Ok(outcome) => {
                 log_manual_run_completed(&agent, work_unit.as_deref(), &outcome);
@@ -499,10 +693,10 @@ fn handle_connection_inner(
                     message: dispatch_error_message(&error),
                 }
             }
-        },
+        }
     };
 
-    write_response(&mut stream, &response)
+    writer.finish(response)
 }
 
 fn write_response(stream: &mut UnixStream, response: &ResponseMessage) -> Result<(), io::Error> {
@@ -522,6 +716,312 @@ fn write_response_part(stream: &mut UnixStream, bytes: &[u8]) -> Result<(), io::
         Ok(()) => Ok(()),
         Err(error) if peer_disconnected_during_response(&error) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn serialize_response_frame(response: &ResponseMessage) -> Result<Vec<u8>, io::Error> {
+    let mut payload = serde_json::to_vec(response)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    payload.push(b'\n');
+    Ok(payload)
+}
+
+struct ProgressWriter {
+    shared: Arc<ProgressWriterShared>,
+    completion: mpsc::Receiver<Result<(), io::Error>>,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Clone)]
+struct ProgressWriterSink {
+    shared: Arc<ProgressWriterShared>,
+}
+
+struct ProgressWriterShared {
+    state: Mutex<ProgressWriterState>,
+    available: Condvar,
+}
+
+struct ProgressWriterState {
+    progress: VecDeque<QueuedProgressFrame>,
+    terminal: Option<Vec<u8>>,
+    closed: bool,
+}
+
+struct QueuedProgressFrame {
+    bytes: Vec<u8>,
+    deliver_before_terminal: bool,
+}
+
+enum ProgressWriterFrame {
+    Progress(Vec<u8>),
+    Terminal(Vec<u8>),
+}
+
+impl ProgressWriter {
+    fn spawn(stream: UnixStream) -> Result<Self, io::Error> {
+        let shared = Arc::new(ProgressWriterShared {
+            state: Mutex::new(ProgressWriterState {
+                progress: VecDeque::new(),
+                terminal: None,
+                closed: false,
+            }),
+            available: Condvar::new(),
+        });
+        let (completion_tx, completion) = mpsc::channel();
+        let writer_shared = Arc::clone(&shared);
+        let handle = thread::spawn(move || {
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                run_progress_writer(stream, writer_shared)
+            }));
+            let completion = match result {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::error!(
+                        event = "agentd.manual_run_progress_writer_panicked",
+                        "manual run progress writer panicked"
+                    );
+                    Err(io::Error::other("manual run progress writer panicked"))
+                }
+            };
+            let _ = completion_tx.send(completion);
+        });
+
+        Ok(Self {
+            shared,
+            completion,
+            handle,
+        })
+    }
+
+    fn sink(&self) -> ProgressWriterSink {
+        ProgressWriterSink {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    fn finish(self, response: ResponseMessage) -> Result<(), io::Error> {
+        let terminal = serialize_response_frame(&response)?;
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.progress.retain(|frame| frame.deliver_before_terminal);
+        state.terminal = Some(terminal);
+        self.shared.available.notify_one();
+        drop(state);
+
+        match self
+            .completion
+            .recv_timeout(PROGRESS_TERMINAL_DRAIN_TIMEOUT)
+        {
+            Ok(result) => {
+                join_progress_writer(self.handle);
+                result
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_terminal_drain_abandoned",
+                    timeout_ms = PROGRESS_TERMINAL_DRAIN_TIMEOUT.as_millis(),
+                    "manual run progress writer did not drain the terminal response before the deadline"
+                );
+                Ok(())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                join_progress_writer(self.handle);
+                Err(io::Error::other(
+                    "manual run progress writer exited without reporting completion",
+                ))
+            }
+        }
+    }
+}
+
+impl ProgressWriterSink {
+    fn enqueue_progress(&self, response: ResponseMessage) {
+        self.enqueue_progress_frame(response, false);
+    }
+
+    fn enqueue_dispatch_progress(&self, response: ResponseMessage) {
+        let frame = match serialize_response_frame(&response) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_serialization_failed",
+                    error = %error,
+                    "failed to serialize manual run dispatch progress"
+                );
+                return;
+            }
+        };
+        if frame.len() > MAX_PROGRESS_FRAME_BYTES {
+            tracing::debug!(
+                event = "agentd.manual_run_progress_dropped",
+                frame_bytes = frame.len(),
+                max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
+                "dropped oversized manual run dispatch progress frame"
+            );
+            return;
+        }
+
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.closed || state.terminal.is_some() {
+            tracing::debug!(
+                event = "agentd.manual_run_progress_dropped",
+                "dropped manual run dispatch progress after terminal response was queued"
+            );
+            return;
+        }
+
+        state.progress.push_back(QueuedProgressFrame {
+            bytes: frame,
+            deliver_before_terminal: true,
+        });
+        self.shared.available.notify_one();
+    }
+
+    fn enqueue_progress_frame(&self, response: ResponseMessage, deliver_before_terminal: bool) {
+        let frame = match serialize_response_frame(&response) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_serialization_failed",
+                    error = %error,
+                    "failed to serialize manual run progress"
+                );
+                return;
+            }
+        };
+
+        if frame.len() > MAX_PROGRESS_FRAME_BYTES {
+            tracing::debug!(
+                event = "agentd.manual_run_progress_dropped",
+                frame_bytes = frame.len(),
+                max_frame_bytes = MAX_PROGRESS_FRAME_BYTES,
+                "dropped oversized manual run progress frame"
+            );
+            return;
+        }
+
+        match self.shared.state.try_lock() {
+            Ok(mut state) => {
+                if state.closed || state.terminal.is_some() {
+                    tracing::debug!(
+                        event = "agentd.manual_run_progress_dropped",
+                        "dropped manual run progress after terminal response was queued"
+                    );
+                    return;
+                }
+
+                if state.progress.len() >= PROGRESS_QUEUE_CAPACITY {
+                    tracing::debug!(
+                        event = "agentd.manual_run_progress_dropped",
+                        queue_capacity = PROGRESS_QUEUE_CAPACITY,
+                        "dropped manual run progress because the bounded queue is full"
+                    );
+                    return;
+                }
+
+                state.progress.push_back(QueuedProgressFrame {
+                    bytes: frame,
+                    deliver_before_terminal,
+                });
+                self.shared.available.notify_one();
+            }
+            Err(TryLockError::WouldBlock) => {
+                tracing::debug!(
+                    event = "agentd.manual_run_progress_dropped",
+                    "dropped manual run progress while the writer queue was busy"
+                );
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_queue_poisoned",
+                    "failed to lock manual run progress writer queue"
+                );
+            }
+        }
+    }
+}
+
+fn join_progress_writer(handle: JoinHandle<()>) {
+    if handle.join().is_err() {
+        tracing::error!(
+            event = "agentd.manual_run_progress_writer_panicked",
+            "manual run progress writer panicked"
+        );
+    }
+}
+
+fn run_progress_writer(
+    mut stream: UnixStream,
+    shared: Arc<ProgressWriterShared>,
+) -> Result<(), io::Error> {
+    while let Some(frame) = next_progress_writer_frame(&shared) {
+        let is_terminal = matches!(frame, ProgressWriterFrame::Terminal(_));
+        let bytes = match frame {
+            ProgressWriterFrame::Progress(bytes) | ProgressWriterFrame::Terminal(bytes) => bytes,
+        };
+
+        match stream.write_all(&bytes) {
+            Ok(()) if is_terminal => return Ok(()),
+            Ok(()) => {}
+            Err(error) if peer_disconnected_during_response(&error) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    event = "agentd.manual_run_progress_writer_failed",
+                    error = %error,
+                    "manual run progress writer closed the client connection after a write failure"
+                );
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn next_progress_writer_frame(shared: &ProgressWriterShared) -> Option<ProgressWriterFrame> {
+    let mut state = shared
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        if let Some(terminal) = state.terminal.take() {
+            if state
+                .progress
+                .front()
+                .is_some_and(|frame| frame.deliver_before_terminal)
+            {
+                let progress = state
+                    .progress
+                    .pop_front()
+                    .expect("front progress frame should exist");
+                state.terminal = Some(terminal);
+                return Some(ProgressWriterFrame::Progress(progress.bytes));
+            }
+            state.progress.clear();
+            state.closed = true;
+            return Some(ProgressWriterFrame::Terminal(terminal));
+        }
+
+        if let Some(progress) = state.progress.pop_front() {
+            return Some(ProgressWriterFrame::Progress(progress.bytes));
+        }
+
+        if state.closed {
+            return None;
+        }
+
+        state = shared
+            .available
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
     }
 }
 
@@ -730,13 +1230,15 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonError, ResponseMessage, reap_finished_handlers,
+        DaemonError, LiveObservationLevel, ResponseMessage, reap_finished_handlers,
         run_daemon_until_shutdown_with_reconciler, write_response,
     };
     use crate::config::Config;
     use crate::dispatch::SessionExecutor;
+    use crate::protocol::ProgressMessage;
     use agentd_runner::{
-        RunnerError, SessionInvocation, SessionOutcome, SessionSpec, StartupReconciliationReport,
+        RunnerError, SessionInvocation, SessionOutcome, SessionProgressObserver, SessionSpec,
+        StartupReconciliationReport,
     };
     use std::fs;
     use std::io;
@@ -779,6 +1281,7 @@ mod tests {
             &self,
             _spec: SessionSpec,
             _invocation: SessionInvocation,
+            _progress: &dyn SessionProgressObserver,
         ) -> Result<SessionOutcome, RunnerError> {
             Ok(SessionOutcome::Success { exit_code: 0 })
         }
@@ -899,6 +1402,82 @@ source = "AGENTD_GITHUB_TOKEN"
             result.is_ok(),
             "closed peer during response write should be treated as normal completion"
         );
+    }
+
+    #[test]
+    fn summary_progress_escapes_untrusted_transcript_event_kind_controls() {
+        let mut output = Vec::new();
+
+        super::render_progress(
+            ProgressMessage::TranscriptEvent {
+                session_id: "fake-session-1".to_string(),
+                line: "{\"kind\":\"agent_input\\nspoof\\u001b[2J\"}".to_string(),
+            },
+            LiveObservationLevel::Summary,
+            &mut output,
+        )
+        .expect("summary progress should render");
+
+        let output = String::from_utf8(output).expect("summary progress should be utf8");
+        assert_eq!(output, "session event: agent_input\\nspoof\\u{1b}[2J\n");
+        assert!(
+            !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
+            "summary output should not contain embedded terminal controls: {output:?}"
+        );
+    }
+
+    #[test]
+    fn full_progress_escapes_untrusted_raw_transcript_line_controls() {
+        let mut output = Vec::new();
+
+        super::render_progress(
+            ProgressMessage::TranscriptEvent {
+                session_id: "fake-session-1\rspoof".to_string(),
+                line: "{\"kind\":\"agent_input\"}\nspoof\u{1b}[2J".to_string(),
+            },
+            LiveObservationLevel::Full,
+            &mut output,
+        )
+        .expect("full progress should render");
+
+        let output = String::from_utf8(output).expect("full progress should be utf8");
+        assert_eq!(
+            output,
+            "session event: session_id=fake-session-1\\rspoof {\"kind\":\"agent_input\"}\\nspoof\\u{1b}[2J\n"
+        );
+        assert!(
+            !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
+            "full output should not contain embedded terminal controls: {output:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_progress_escapes_untrusted_request_fields_at_every_level() {
+        for level in [LiveObservationLevel::Summary, LiveObservationLevel::Full] {
+            let mut output = Vec::new();
+
+            super::render_progress(
+                ProgressMessage::DispatchStarted {
+                    agent: "site-builder\nspoof\u{1b}[2J".to_string(),
+                    work_unit: Some("issue-122\rrewrite".to_string()),
+                    input_present: true,
+                },
+                level,
+                &mut output,
+            )
+            .expect("dispatch progress should render");
+
+            let output = String::from_utf8(output).expect("dispatch progress should be utf8");
+            assert!(
+                output.contains("site-builder\\nspoof\\u{1b}[2J")
+                    && output.contains("issue-122\\rrewrite"),
+                "dispatch output should escape request fields: {output:?}"
+            );
+            assert!(
+                !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
+                "dispatch output should not contain embedded terminal controls: {output:?}"
+            );
+        }
     }
 
     #[test]

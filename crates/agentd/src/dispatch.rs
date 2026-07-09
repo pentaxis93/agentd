@@ -1,8 +1,9 @@
 use std::fmt;
 
 use agentd_runner::{
-    InvocationInput, ResolvedEnvironmentVariable, RunnerError, SessionInvocation, SessionOutcome,
-    SessionSpec, run_session,
+    InvocationInput, NoopSessionProgressObserver, ResolvedEnvironmentVariable, RunnerError,
+    SessionInvocation, SessionOutcome, SessionProgressObserver, SessionSpec,
+    run_session_with_progress,
 };
 
 use crate::audit_root::prepare_audit_root;
@@ -87,6 +88,7 @@ pub trait SessionExecutor {
         &self,
         spec: SessionSpec,
         invocation: SessionInvocation,
+        progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError>;
 }
 
@@ -99,8 +101,9 @@ impl SessionExecutor for RunnerSessionExecutor {
         &self,
         spec: SessionSpec,
         invocation: SessionInvocation,
+        progress: &dyn SessionProgressObserver,
     ) -> Result<SessionOutcome, RunnerError> {
-        run_session(spec, invocation)
+        run_session_with_progress(spec, invocation, progress)
     }
 }
 
@@ -109,6 +112,24 @@ pub fn dispatch_run(
     config: &Config,
     request: &RunRequest,
     executor: &impl SessionExecutor,
+) -> Result<SessionOutcome, DispatchError> {
+    dispatch_run_after_preflight(
+        config,
+        request,
+        executor,
+        || {},
+        &NoopSessionProgressObserver,
+    )
+}
+
+/// Resolve a named agent plus run request into a runner session, notify once
+/// preflight has passed, and run it.
+pub fn dispatch_run_after_preflight(
+    config: &Config,
+    request: &RunRequest,
+    executor: &impl SessionExecutor,
+    after_preflight: impl FnOnce(),
+    progress: &dyn SessionProgressObserver,
 ) -> Result<SessionOutcome, DispatchError> {
     let agent = config
         .agent(&request.agent)
@@ -149,6 +170,8 @@ pub fn dispatch_run(
         .and_then(|source| std::env::var(source).ok())
         .filter(|value| !value.is_empty());
 
+    after_preflight();
+
     executor
         .run_session(
             SessionSpec {
@@ -173,6 +196,7 @@ pub fn dispatch_run(
                 input: request.input.clone(),
                 timeout: None,
             },
+            progress,
         )
         .map_err(DispatchError::from)
 }

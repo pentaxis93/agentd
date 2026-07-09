@@ -53,7 +53,8 @@ pub struct SessionSpec {
     /// are passed as direct `--env` assignments.
     /// Names reserved for runner-owned values such as `AGENT_NAME`,
     /// `GROUNDWORK_FORGE_TYPE`, `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`,
-    /// `RUNA_TRANSCRIPT_DIR`, and `RUNA_TRANSCRIPT_REDACT_ENV` are rejected
+    /// `RUNA_TRANSCRIPT_DIR`, `RUNA_TRANSCRIPT_DEPLOYMENT`,
+    /// `RUNA_TRANSCRIPT_RUN_ID`, and `RUNA_TRANSCRIPT_REDACT_ENV` are rejected
     /// during validation.
     pub environment: Vec<ResolvedEnvironmentVariable>,
 }
@@ -133,6 +134,35 @@ pub struct SessionInvocation {
     /// container after this duration and returns
     /// [`SessionOutcome::TimedOut`].
     pub timeout: Option<Duration>,
+}
+
+/// Non-terminal progress observed while a session is executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionProgressEvent {
+    /// One complete line from the session's addressed nested runa event stream.
+    TranscriptEvent { session_id: String, line: String },
+}
+
+/// Receives best-effort execution progress while a session is running.
+pub trait SessionProgressObserver: Send + Sync {
+    fn observe(&self, event: SessionProgressEvent);
+}
+
+impl<F> SessionProgressObserver for F
+where
+    F: Fn(SessionProgressEvent) + Send + Sync,
+{
+    fn observe(&self, event: SessionProgressEvent) {
+        self(event);
+    }
+}
+
+/// Progress observer used by callers that only need the terminal outcome.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopSessionProgressObserver;
+
+impl SessionProgressObserver for NoopSessionProgressObserver {
+    fn observe(&self, _event: SessionProgressEvent) {}
 }
 
 /// Terminal outcome of a completed session.
@@ -435,7 +465,10 @@ impl fmt::Display for RunnerError {
             RunnerError::ReservedEnvironmentName { name } => {
                 if matches!(
                     name.as_str(),
-                    "RUNA_TRANSCRIPT_DIR" | "RUNA_TRANSCRIPT_REDACT_ENV"
+                    "RUNA_TRANSCRIPT_DIR"
+                        | "RUNA_TRANSCRIPT_DEPLOYMENT"
+                        | "RUNA_TRANSCRIPT_RUN_ID"
+                        | "RUNA_TRANSCRIPT_REDACT_ENV"
                 ) {
                     write!(
                         f,

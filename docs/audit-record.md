@@ -17,7 +17,8 @@ One record per session at `<audit_root>/<agent>/<session_id>/`:
 └── agentd/
     ├── session.json               # agentd-written session metadata (schema below)
     └── transcript/
-        ├── events.jsonl           # structured transcript events (one JSON object per line)
+        ├── deployments/<deployment>/work-units/<work-unit>/runs/<run-id>/events.jsonl
+        │                           # runa-owned structured event stream(s)
         ├── transcript.md          # human-readable rendering of the event stream
         └── manifest.json          # transcript schema version + coverage verdict
 ```
@@ -67,8 +68,9 @@ torn write.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | integer | `1` |
+| `schema_version` | integer | `1` for this manifest format, not the runa event schema |
 | `coverage` | string | `full`, `missing_mcp_events`, `no_events`, or `finalization_failed` |
+| `event_schema_versions` | array of integers | sorted distinct `schema_version` values found in assembled runa events; empty when no events were found or finalization failed before events could be read |
 | `finalization_error` | string | present only with `finalization_failed` |
 
 Coverage is honest by construction: a failure while rendering the
@@ -76,6 +78,16 @@ transcript is itself recorded as `finalization_failed` with the error, so
 the manifest never overstates what the transcript captured.
 `missing_mcp_events` means runa ran but the agent runtime never launched
 `runa-mcp`, so tool-call events were not observable.
+
+agentd passes `RUNA_TRANSCRIPT_DEPLOYMENT` and `RUNA_TRANSCRIPT_RUN_ID` through
+the post-`gosu` `runa run` process boundary. Live progress and sealed
+finalization both read event files only below the matching nested deployment
+and run id, while allowing multiple work-unit stage directories to appear
+during one session. They enumerate work units, not arbitrary `runs/*`, so a
+runa-minted run id remains an identity-delivery failure rather than a
+successful discovery fallback. Every nested directory component below the
+trusted `agentd/transcript` base is traversed without following symlinks, and
+unsafe symlinked ancestors are refused rather than read through.
 
 ## Change policy
 

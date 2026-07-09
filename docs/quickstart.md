@@ -73,9 +73,11 @@ In a second shell, trigger the canonical integration intent
 `What do you wish to be true?` For this smoke test, enter
 ``add a `greet(name)` function`` at that statement prompt, then leave the target
 prompt blank when asked `What is this wish aimed at? Leave blank if it has no
-target.` The command blocks until the session reaches a terminal outcome and
-reports it. `success` means the work completed; any other label is interpreted
-per
+target.` The command streams live progress in that terminal while it waits for
+the session to finish, printing concise transcript event names by default. Use
+`--progress full` to include raw transcript event detail. It then reports the
+terminal outcome. `success` means the work completed; any other label is
+interpreted per
 [commons EXIT-CODES.md](https://github.com/tesserine/commons/blob/main/EXIT-CODES.md).
 
 ## 6. Inspect the audit record

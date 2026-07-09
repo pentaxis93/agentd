@@ -11,7 +11,7 @@
 //!    half-built record is never observable.
 //! 2. The session runs; runa writes `runa/` state and transcript events
 //!    arrive in `agentd/transcript/` through the session-user identity.
-//! 3. [`finalize_session_transcript`] — render `events.jsonl` into
+//! 3. [`finalize_session_transcript`] — render runa's nested event files into
 //!    `transcript.md` and record a coverage verdict in `manifest.json`.
 //!    A rendering failure is itself recorded (`finalization_failed`) so
 //!    the manifest never silently overstates coverage.
@@ -41,17 +41,19 @@
 //!   user-namespace re-entry happens during finalization; the startup
 //!   audit-root probe verified this authority before any dispatch.
 
+use crate::transcript::{TranscriptEventFile, TranscriptEventSource, TranscriptIdentity};
 use crate::{RunnerError, SessionInvocation, SessionOutcome, SessionSpec};
 use serde::Serialize;
 use serde_json::Value;
 #[cfg(test)]
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -68,7 +70,7 @@ const SEALED_FILE_MODE: u32 = 0o444;
 /// Sealed directories: traversal without write, same tradeoff as files.
 const SEALED_DIRECTORY_MODE: u32 = 0o555;
 /// `manifest.json` schema version for the transcript coverage verdict.
-const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
+const TRANSCRIPT_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const EVENTS_ARTIFACT: &str = "events.jsonl";
 const MANIFEST_ARTIFACT: &str = "manifest.json";
 const MARKDOWN_ARTIFACT: &str = "transcript.md";
@@ -89,6 +91,7 @@ pub(crate) struct SessionAuditRecord {
     pub(crate) agent: String,
     pub(crate) repo_url: String,
     pub(crate) work_unit: Option<String>,
+    pub(crate) transcript_identity: TranscriptIdentity,
     pub(crate) start_timestamp: String,
 }
 
@@ -173,6 +176,11 @@ fn prepare_session_audit_record_at(
             agent: spec.agent_name.clone(),
             repo_url: invocation.repo_url.clone(),
             work_unit: invocation.work_unit.clone(),
+            transcript_identity: TranscriptIdentity::new(
+                &spec.forge_type,
+                &invocation.repo_url,
+                session_id,
+            ),
             start_timestamp,
         };
 
@@ -219,8 +227,13 @@ pub(crate) fn finalize_session_transcript(record: &SessionAuditRecord) -> Result
         Err(failure) => {
             let failure_message = failure.to_string();
             if failure.artifact != MANIFEST_ARTIFACT {
-                write_transcript_manifest(record, "finalization_failed", Some(&failure_message))
-                    .map_err(|manifest_failure| manifest_failure.error)?;
+                write_transcript_manifest(
+                    record,
+                    "finalization_failed",
+                    Vec::new(),
+                    Some(&failure_message),
+                )
+                .map_err(|manifest_failure| manifest_failure.error)?;
             }
             Err(failure.error)
         }
@@ -230,14 +243,18 @@ pub(crate) fn finalize_session_transcript(record: &SessionAuditRecord) -> Result
 fn finalize_session_transcript_artifacts(
     record: &SessionAuditRecord,
 ) -> Result<(), TranscriptFinalizationFailure> {
-    let events_path = record.transcript_dir.join(EVENTS_ARTIFACT);
-    let mut events = open_or_create_transcript_events(&events_path)?;
-    let coverage = transcript_coverage(&mut events)?;
-    events
-        .seek(SeekFrom::Start(0))
-        .map_err(|error| artifact_failure(EVENTS_ARTIFACT, error))?;
-    write_transcript_markdown(record, &mut events)?;
-    write_transcript_manifest(record, coverage, None)?;
+    let source = TranscriptEventSource::from_record(record);
+    let event_paths = source
+        .discover_event_files()
+        .map_err(|error| runner_artifact_failure(EVENTS_ARTIFACT, error))?;
+    let summary = transcript_summary(&source, &event_paths)?;
+    write_transcript_markdown(record, &source, &event_paths)?;
+    write_transcript_manifest(
+        record,
+        summary.coverage(),
+        summary.event_schema_versions(),
+        None,
+    )?;
     Ok(())
 }
 
@@ -300,6 +317,7 @@ fn current_timestamp() -> Result<String, RunnerError> {
 struct TranscriptManifest<'a> {
     schema_version: u32,
     coverage: &'a str,
+    event_schema_versions: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     finalization_error: Option<&'a str>,
 }
@@ -322,11 +340,13 @@ fn write_transcript_manifest_payload(
 fn write_transcript_manifest(
     record: &SessionAuditRecord,
     coverage: &str,
+    event_schema_versions: Vec<u64>,
     finalization_error: Option<&str>,
 ) -> Result<(), TranscriptFinalizationFailure> {
     let manifest = TranscriptManifest {
-        schema_version: TRANSCRIPT_SCHEMA_VERSION,
+        schema_version: TRANSCRIPT_MANIFEST_SCHEMA_VERSION,
         coverage,
+        event_schema_versions,
         finalization_error,
     };
     write_transcript_manifest_payload(record, manifest)
@@ -334,7 +354,8 @@ fn write_transcript_manifest(
 
 fn write_transcript_markdown(
     record: &SessionAuditRecord,
-    events: &mut File,
+    source: &TranscriptEventSource,
+    event_paths: &[TranscriptEventFile],
 ) -> Result<(), TranscriptFinalizationFailure> {
     let mut markdown = create_new_transcript_artifact(
         &record.transcript_dir.join(MARKDOWN_ARTIFACT),
@@ -344,40 +365,43 @@ fn write_transcript_markdown(
         .write_all(b"# Session Transcript\n\n")
         .map_err(|error| artifact_failure(MARKDOWN_ARTIFACT, error))?;
 
-    let mut reader = BufReader::new(events);
     let mut line = String::new();
     let mut wrote_event = false;
-    loop {
-        line.clear();
-        let bytes_read = reader
-            .read_line(&mut line)
-            .map_err(|error| artifact_failure(EVENTS_ARTIFACT, error))?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        wrote_event = true;
-        match serde_json::from_str::<Value>(line) {
-            Ok(event) => {
-                let kind = event.get("kind").and_then(Value::as_str).unwrap_or("event");
-                writeln!(markdown, "## {kind}\n")
-                    .map_err(|error| artifact_failure(MARKDOWN_ARTIFACT, error))?;
-                if let Some(content) = event.get("content").and_then(Value::as_str) {
-                    write_fenced_code_block(&mut markdown, "text", content)?;
-                } else {
-                    write_fenced_code_block(&mut markdown, "json", line)?;
-                }
+    for event_file in event_paths {
+        let events = open_transcript_events(source, event_file)?;
+        let mut reader = BufReader::new(events);
+        loop {
+            line.clear();
+            let bytes_read = reader
+                .read_line(&mut line)
+                .map_err(|error| artifact_failure(EVENTS_ARTIFACT, error))?;
+            if bytes_read == 0 {
+                break;
             }
-            Err(_) => {
-                markdown
-                    .write_all(b"## unparsed_event\n\n")
-                    .map_err(|error| artifact_failure(MARKDOWN_ARTIFACT, error))?;
-                write_fenced_code_block(&mut markdown, "text", line)?;
+
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            wrote_event = true;
+            match serde_json::from_str::<Value>(line) {
+                Ok(event) => {
+                    let kind = event.get("kind").and_then(Value::as_str).unwrap_or("event");
+                    writeln!(markdown, "## {kind}\n")
+                        .map_err(|error| artifact_failure(MARKDOWN_ARTIFACT, error))?;
+                    if let Some(content) = event.get("content").and_then(Value::as_str) {
+                        write_fenced_code_block(&mut markdown, "text", content)?;
+                    } else {
+                        write_fenced_code_block(&mut markdown, "json", line)?;
+                    }
+                }
+                Err(_) => {
+                    markdown
+                        .write_all(b"## unparsed_event\n\n")
+                        .map_err(|error| artifact_failure(MARKDOWN_ARTIFACT, error))?;
+                    write_fenced_code_block(&mut markdown, "text", line)?;
+                }
             }
         }
     }
@@ -391,54 +415,13 @@ fn write_transcript_markdown(
     Ok(())
 }
 
-fn open_or_create_transcript_events(path: &Path) -> Result<File, TranscriptFinalizationFailure> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            create_empty_transcript_artifact(path, EVENTS_ARTIFACT)?;
-            fs::symlink_metadata(path).map_err(|error| artifact_failure(EVENTS_ARTIFACT, error))?
-        }
-        Err(error) => return Err(artifact_failure(EVENTS_ARTIFACT, error)),
-    };
-
-    if !metadata.is_file() {
-        return Err(unsafe_artifact_failure(
-            EVENTS_ARTIFACT,
-            "is not a regular file",
-        ));
-    }
-
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| match error.raw_os_error() {
-            Some(libc::ELOOP) => unsafe_artifact_failure(EVENTS_ARTIFACT, "is not a regular file"),
-            _ => artifact_failure(EVENTS_ARTIFACT, error),
-        })?;
-    let open_metadata = file
-        .metadata()
-        .map_err(|error| artifact_failure(EVENTS_ARTIFACT, error))?;
-    if !open_metadata.is_file()
-        || open_metadata.dev() != metadata.dev()
-        || open_metadata.ino() != metadata.ino()
-    {
-        return Err(unsafe_artifact_failure(
-            EVENTS_ARTIFACT,
-            "is not a regular file",
-        ));
-    }
-
-    Ok(file)
-}
-
-fn create_empty_transcript_artifact(
-    path: &Path,
-    artifact: &'static str,
-) -> Result<(), TranscriptFinalizationFailure> {
-    let file = create_new_transcript_artifact(path, artifact)?;
-    drop(file);
-    Ok(())
+fn open_transcript_events(
+    source: &TranscriptEventSource,
+    event_file: &TranscriptEventFile,
+) -> Result<File, TranscriptFinalizationFailure> {
+    source
+        .open_event_file(event_file)
+        .map_err(|error| runner_artifact_failure(EVENTS_ARTIFACT, error))
 }
 
 fn write_new_transcript_artifact(
@@ -477,6 +460,13 @@ fn artifact_failure(
         artifact,
         error: RunnerError::Io(error),
     }
+}
+
+fn runner_artifact_failure(
+    artifact: &'static str,
+    error: RunnerError,
+) -> TranscriptFinalizationFailure {
+    TranscriptFinalizationFailure { artifact, error }
 }
 
 fn unsafe_artifact_failure(artifact: &'static str, reason: &str) -> TranscriptFinalizationFailure {
@@ -523,11 +513,47 @@ fn max_consecutive_backticks(content: &str) -> usize {
     max
 }
 
-fn transcript_coverage(events: &mut File) -> Result<&'static str, TranscriptFinalizationFailure> {
+#[derive(Debug, Default)]
+struct TranscriptSummary {
+    saw_event: bool,
+    saw_mcp_event: bool,
+    event_schema_versions: BTreeSet<u64>,
+}
+
+impl TranscriptSummary {
+    fn coverage(&self) -> &'static str {
+        if self.saw_mcp_event {
+            "full"
+        } else if self.saw_event {
+            "missing_mcp_events"
+        } else {
+            "no_events"
+        }
+    }
+
+    fn event_schema_versions(&self) -> Vec<u64> {
+        self.event_schema_versions.iter().copied().collect()
+    }
+}
+
+fn transcript_summary(
+    source: &TranscriptEventSource,
+    event_paths: &[TranscriptEventFile],
+) -> Result<TranscriptSummary, TranscriptFinalizationFailure> {
+    let mut summary = TranscriptSummary::default();
+    for event_file in event_paths {
+        let events = open_transcript_events(source, event_file)?;
+        summarize_transcript_events(events, &mut summary)?;
+    }
+    Ok(summary)
+}
+
+fn summarize_transcript_events(
+    events: File,
+    summary: &mut TranscriptSummary,
+) -> Result<(), TranscriptFinalizationFailure> {
     let mut reader = BufReader::new(events);
     let mut line = String::new();
-    let mut saw_event = false;
-    let mut saw_mcp_event = false;
     loop {
         line.clear();
         let bytes_read = reader
@@ -542,26 +568,18 @@ fn transcript_coverage(events: &mut File) -> Result<&'static str, TranscriptFina
             continue;
         }
 
-        saw_event = true;
-        if serde_json::from_str::<Value>(line)
-            .ok()
-            .and_then(|event| {
-                (event.get("source").and_then(Value::as_str) == Some("runa-mcp")).then_some(())
-            })
-            .is_some()
-        {
-            saw_mcp_event = true;
+        summary.saw_event = true;
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
+            if event.get("source").and_then(Value::as_str) == Some("runa-mcp") {
+                summary.saw_mcp_event = true;
+            }
+            if let Some(schema_version) = event.get("schema_version").and_then(Value::as_u64) {
+                summary.event_schema_versions.insert(schema_version);
+            }
         }
     }
 
-    let coverage = if saw_mcp_event {
-        "full"
-    } else if saw_event {
-        "missing_mcp_events"
-    } else {
-        "no_events"
-    };
-    Ok(coverage)
+    Ok(())
 }
 
 fn rollback_record_dir_on_error<T, F>(record_dir: &Path, init: F) -> Result<T, RunnerError>
@@ -1460,7 +1478,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_session_transcript_creates_empty_events_jsonl_when_no_events_were_emitted() {
+    fn finalize_session_transcript_reports_no_events_without_creating_flat_events_jsonl() {
         let root = unique_test_dir("agentd-audit-empty-transcript");
         let record = prepare_session_audit_record_at(
             &root,
@@ -1478,16 +1496,10 @@ mod tests {
 
         super::finalize_session_transcript(&record).expect("transcript should finalize");
 
-        let events_path = record.transcript_dir.join("events.jsonl");
-        let events =
-            fs::read_to_string(&events_path).expect("empty structured transcript should exist");
         assert!(
-            events.is_empty(),
-            "empty jsonl file should contain no events"
+            !record.transcript_dir.join("events.jsonl").exists(),
+            "agentd should not create a flat transcript event stream"
         );
-        for line in events.lines() {
-            let _event: Value = serde_json::from_str(line).expect("jsonl line should be json");
-        }
 
         let manifest: Value = serde_json::from_str(
             &fs::read_to_string(record.transcript_dir.join("manifest.json"))
@@ -1495,8 +1507,431 @@ mod tests {
         )
         .expect("manifest should be json");
         assert_eq!(manifest["coverage"], "no_events");
+        assert_eq!(manifest["event_schema_versions"], serde_json::json!([]));
 
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn transcript_event_source_discovers_stage_file_created_after_first_scan() {
+        let root = unique_test_dir("agentd-audit-nested-growth");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "nested-growth",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let source = crate::transcript::TranscriptEventSource::from_record(&record);
+        let first_path = source.event_file_path_for_work_unit("survey");
+        fs::create_dir_all(first_path.parent().expect("event path parent"))
+            .expect("first nested event dir should be created");
+        fs::write(
+            &first_path,
+            "{\"schema_version\":2,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"survey\"}\n",
+        )
+        .expect("first nested event file should be written");
+
+        let discovered = source
+            .discover_event_files()
+            .expect("first discovery should succeed");
+        let discovered_paths: Vec<_> = discovered.iter().map(|event| event.path()).collect();
+        assert_eq!(discovered_paths, vec![first_path.as_path()]);
+
+        let second_path = source.event_file_path_for_work_unit("take/stage#1");
+        fs::create_dir_all(second_path.parent().expect("event path parent"))
+            .expect("second nested event dir should be created");
+        fs::write(
+            &second_path,
+            "{\"schema_version\":2,\"source\":\"runa-mcp\",\"kind\":\"tool_call\",\"content\":\"take\"}\n",
+        )
+        .expect("second nested event file should be written");
+
+        let discovered = source
+            .discover_event_files()
+            .expect("second discovery should succeed");
+        let discovered_paths: Vec<_> = discovered.iter().map(|event| event.path()).collect();
+        assert_eq!(
+            discovered_paths.len(),
+            2,
+            "source must re-scan for new stages"
+        );
+        assert!(
+            discovered_paths.contains(&first_path.as_path()),
+            "{discovered:?}"
+        );
+        assert!(
+            discovered_paths.contains(&second_path.as_path()),
+            "{discovered:?}"
+        );
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_reads_nested_runa_events_not_flat_events_jsonl() {
+        let root = unique_test_dir("agentd-audit-nested-transcript");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "nested-transcript",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        fs::write(
+            record.transcript_dir.join("events.jsonl"),
+            "{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"flat\"}\n",
+        )
+        .expect("flat event file should be written");
+        write_nested_events(
+            &record,
+            "survey",
+            "{\"schema_version\":2,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"nested survey\"}\n",
+        );
+        write_nested_events(
+            &record,
+            "take/stage#1",
+            "{\"schema_version\":2,\"source\":\"runa-mcp\",\"kind\":\"tool_call\",\"content\":\"nested take\"}\n",
+        );
+
+        super::finalize_session_transcript(&record).expect("transcript should finalize");
+
+        let markdown = fs::read_to_string(record.transcript_dir.join("transcript.md"))
+            .expect("transcript markdown should exist");
+        assert!(markdown.contains("nested survey"), "{markdown}");
+        assert!(markdown.contains("nested take"), "{markdown}");
+        assert!(!markdown.contains("flat"), "{markdown}");
+
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("transcript manifest should exist"),
+        )
+        .expect("manifest should be json");
+        assert_eq!(manifest["coverage"], "full");
+        assert_eq!(manifest["event_schema_versions"], serde_json::json!([2]));
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_ignores_runa_minted_run_ids() {
+        let root = unique_test_dir("agentd-audit-minted-run-id-transcript");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "agentd-owned-run-id",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let exact_events_path = crate::transcript::TranscriptEventSource::from_record(&record)
+            .event_file_path_for_work_unit("survey");
+        let runs_dir = exact_events_path
+            .parent()
+            .and_then(Path::parent)
+            .expect("event path should have a runs directory");
+        let minted_events_path = runs_dir.join("run-minted-by-runa").join("events.jsonl");
+        fs::create_dir_all(minted_events_path.parent().expect("minted events parent"))
+            .expect("minted run event directory should be created");
+        fs::write(
+            &minted_events_path,
+            "{\"schema_version\":2,\"source\":\"runa-mcp\",\"kind\":\"tool_call\",\"content\":\"minted should not count\"}\n",
+        )
+        .expect("minted run events should be written");
+
+        super::finalize_session_transcript(&record).expect("transcript should finalize");
+
+        let markdown = fs::read_to_string(record.transcript_dir.join("transcript.md"))
+            .expect("transcript markdown should exist");
+        assert!(!markdown.contains("minted should not count"), "{markdown}");
+        assert!(
+            markdown.contains("No structured transcript events"),
+            "mismatched run ids should surface as missing identity delivery, not discovery success: {markdown}"
+        );
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("transcript manifest should exist"),
+        )
+        .expect("manifest should be json");
+        assert_eq!(manifest["coverage"], "no_events");
+        assert_eq!(manifest["event_schema_versions"], serde_json::json!([]));
+
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[test]
+    fn finalize_session_transcript_refuses_symlinked_nested_transcript_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        for ancestor in SymlinkAncestor::refused_cases() {
+            let root = unique_test_dir(&format!(
+                "agentd-audit-symlinked-transcript-{}",
+                ancestor.name()
+            ));
+            let record = prepare_session_audit_record_at(
+                &root,
+                &format!("symlinked-{}", ancestor.name()),
+                &test_session_spec(),
+                &SessionInvocation {
+                    repo_url: "https://example.com/agentd.git".to_string(),
+                    repo_token: None,
+                    work_unit: None,
+                    input: None,
+                    timeout: None,
+                },
+            )
+            .expect("audit record should be created");
+            let outside_root = root.join("outside-transcript");
+            let outside_events = create_outside_nested_events(&record, &outside_root);
+            fs::set_permissions(&outside_events, fs::Permissions::from_mode(0o600))
+                .expect("outside events should start with controlled mode");
+            let before_mode = fs::metadata(&outside_events)
+                .expect("outside events metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777;
+
+            let link_path = ancestor.link_path(&record);
+            if let Some(parent) = link_path.parent() {
+                fs::create_dir_all(parent).expect("symlink parent should be created");
+            }
+            symlink(ancestor.outside_target(&record, &outside_root), &link_path)
+                .expect("symlinked transcript ancestor should be created");
+
+            let result = super::finalize_session_transcript(&record);
+
+            let after_mode = fs::metadata(&outside_events)
+                .expect("outside events metadata should exist")
+                .permissions()
+                .mode()
+                & 0o777;
+            let markdown =
+                fs::read_to_string(record.transcript_dir.join("transcript.md")).unwrap_or_default();
+            let manifest =
+                fs::read_to_string(record.transcript_dir.join("manifest.json")).unwrap_or_default();
+
+            assert!(
+                result.is_err(),
+                "known symlinked ancestor {} should be refused",
+                ancestor.name()
+            );
+            assert_eq!(
+                before_mode,
+                after_mode,
+                "outside target must not be chmoded through {}",
+                ancestor.name()
+            );
+            assert!(
+                !markdown.contains("outside secret"),
+                "outside events must not be rendered through {}: {markdown}",
+                ancestor.name()
+            );
+            assert!(
+                !manifest.contains("full"),
+                "outside events must not contribute coverage through {}: {manifest}",
+                ancestor.name()
+            );
+
+            fs::remove_file(link_path).expect("symlink should be removable");
+            make_tree_writable(&root);
+            fs::remove_dir_all(root).expect("temporary audit root should be removed");
+        }
+    }
+
+    #[test]
+    fn transcript_event_source_skips_symlinked_work_unit_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("agentd-audit-symlinked-work-unit-entry");
+        let record = prepare_session_audit_record_at(
+            &root,
+            "symlinked-work-unit-entry",
+            &test_session_spec(),
+            &SessionInvocation {
+                repo_url: "https://example.com/agentd.git".to_string(),
+                repo_token: None,
+                work_unit: None,
+                input: None,
+                timeout: None,
+            },
+        )
+        .expect("audit record should be created");
+        let outside_root = root.join("outside-transcript");
+        let outside_events = create_outside_nested_events(&record, &outside_root);
+        let source = crate::transcript::TranscriptEventSource::from_record(&record);
+        let work_unit_link = source.event_file_path_for_work_unit("survey");
+        let work_unit_link = work_unit_link
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("work-unit path should have an encoded work-unit ancestor")
+            .to_path_buf();
+        fs::create_dir_all(work_unit_link.parent().expect("work-unit parent"))
+            .expect("work-units directory should be created");
+        symlink(
+            outside_events
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .expect("outside events should have a work-unit ancestor"),
+            &work_unit_link,
+        )
+        .expect("symlinked work-unit entry should be created");
+
+        super::finalize_session_transcript(&record).expect("transcript should finalize safely");
+
+        let markdown = fs::read_to_string(record.transcript_dir.join("transcript.md"))
+            .expect("transcript markdown should exist");
+        let manifest: Value = serde_json::from_str(
+            &fs::read_to_string(record.transcript_dir.join("manifest.json"))
+                .expect("manifest should exist"),
+        )
+        .expect("manifest should be json");
+        assert!(!markdown.contains("outside secret"), "{markdown}");
+        assert_eq!(manifest["coverage"], "no_events");
+
+        fs::remove_file(work_unit_link).expect("work-unit symlink should be removable");
+        fs::remove_dir_all(root).expect("temporary audit root should be removed");
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum SymlinkAncestor {
+        Deployments,
+        Deployment,
+        WorkUnits,
+        Runs,
+        RunId,
+    }
+
+    impl SymlinkAncestor {
+        fn refused_cases() -> [Self; 5] {
+            [
+                Self::Deployments,
+                Self::Deployment,
+                Self::WorkUnits,
+                Self::Runs,
+                Self::RunId,
+            ]
+        }
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::Deployments => "deployments",
+                Self::Deployment => "deployment",
+                Self::WorkUnits => "work-units",
+                Self::Runs => "runs",
+                Self::RunId => "run-id",
+            }
+        }
+
+        fn link_path(self, record: &super::SessionAuditRecord) -> PathBuf {
+            let source = crate::transcript::TranscriptEventSource::from_record(record);
+            let event_path = source.event_file_path_for_work_unit("survey");
+            match self {
+                Self::Deployments => record.transcript_dir.join("deployments"),
+                Self::Deployment => event_path
+                    .ancestors()
+                    .nth(5)
+                    .expect("event path should have deployment ancestor")
+                    .to_path_buf(),
+                Self::WorkUnits => event_path
+                    .ancestors()
+                    .nth(4)
+                    .expect("event path should have work-units ancestor")
+                    .to_path_buf(),
+                Self::Runs => event_path
+                    .ancestors()
+                    .nth(2)
+                    .expect("event path should have runs ancestor")
+                    .to_path_buf(),
+                Self::RunId => event_path
+                    .parent()
+                    .expect("event path should have run-id parent")
+                    .to_path_buf(),
+            }
+        }
+
+        fn outside_target(
+            self,
+            record: &super::SessionAuditRecord,
+            outside_root: &Path,
+        ) -> PathBuf {
+            let source = crate::transcript::TranscriptEventSource::from_record(record);
+            let outside_events = outside_root.join(
+                source
+                    .event_file_path_for_work_unit("survey")
+                    .strip_prefix(&record.transcript_dir)
+                    .expect("event path should live under transcript dir"),
+            );
+            match self {
+                Self::Deployments => outside_root.join("deployments"),
+                Self::Deployment => outside_events
+                    .ancestors()
+                    .nth(5)
+                    .expect("outside event path should have deployment ancestor")
+                    .to_path_buf(),
+                Self::WorkUnits => outside_events
+                    .ancestors()
+                    .nth(4)
+                    .expect("outside event path should have work-units ancestor")
+                    .to_path_buf(),
+                Self::Runs => outside_events
+                    .ancestors()
+                    .nth(2)
+                    .expect("outside event path should have runs ancestor")
+                    .to_path_buf(),
+                Self::RunId => outside_events
+                    .parent()
+                    .expect("outside event path should have run-id parent")
+                    .to_path_buf(),
+            }
+        }
+    }
+
+    fn create_outside_nested_events(
+        record: &super::SessionAuditRecord,
+        outside_root: &Path,
+    ) -> PathBuf {
+        let source = crate::transcript::TranscriptEventSource::from_record(record);
+        let outside_events = outside_root.join(
+            source
+                .event_file_path_for_work_unit("survey")
+                .strip_prefix(&record.transcript_dir)
+                .expect("event path should live under transcript dir"),
+        );
+        fs::create_dir_all(outside_events.parent().expect("outside events parent"))
+            .expect("outside nested event directory should be created");
+        fs::write(
+            &outside_events,
+            "{\"schema_version\":2,\"source\":\"runa-mcp\",\"kind\":\"tool_call\",\"content\":\"outside secret\"}\n",
+        )
+        .expect("outside events should be written");
+        outside_events
+    }
+
+    fn write_nested_events(record: &super::SessionAuditRecord, work_unit: &str, events: &str) {
+        let source = crate::transcript::TranscriptEventSource::from_record(record);
+        let path = source.event_file_path_for_work_unit(work_unit);
+        fs::create_dir_all(path.parent().expect("event path parent"))
+            .expect("nested event directory should be created");
+        fs::write(path, events).expect("nested events should be written");
     }
 
     #[test]
@@ -1515,11 +1950,11 @@ mod tests {
             },
         )
         .expect("audit record should be created");
-        fs::write(
-            record.transcript_dir.join("events.jsonl"),
+        write_nested_events(
+            &record,
+            "survey",
             "{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\",\"content\":\"hello\"}\n",
-        )
-        .expect("events jsonl should be created");
+        );
         fs::set_permissions(&record.transcript_dir, fs::Permissions::from_mode(0o000))
             .expect("transcript dir should become restrictive");
 
@@ -1558,7 +1993,10 @@ mod tests {
             },
         )
         .expect("audit record should be created");
-        let events_path = record.transcript_dir.join("events.jsonl");
+        let events_path = crate::transcript::TranscriptEventSource::from_record(&record)
+            .event_file_path_for_work_unit("survey");
+        fs::create_dir_all(events_path.parent().expect("event path parent"))
+            .expect("nested event directory should be created");
         fs::write(
             &events_path,
             "{\"schema_version\":1,\"source\":\"runa-mcp\",\"kind\":\"tool_call\"}\n",
@@ -1607,7 +2045,11 @@ mod tests {
         .expect("runa target should be created");
         fs::set_permissions(&runa_target, fs::Permissions::from_mode(0o000))
             .expect("runa target should start unreadable");
-        fs::hard_link(&runa_target, record.transcript_dir.join("events.jsonl"))
+        let events_path = crate::transcript::TranscriptEventSource::from_record(&record)
+            .event_file_path_for_work_unit("survey");
+        fs::create_dir_all(events_path.parent().expect("event path parent"))
+            .expect("nested event directory should be created");
+        fs::hard_link(&runa_target, &events_path)
             .expect("hard-linked transcript events should be created");
 
         let before_mode = fs::metadata(&runa_target)
@@ -1699,7 +2141,11 @@ mod tests {
         .expect("audit record should be created");
         let outside_target = root.join("outside-events.jsonl");
         fs::write(&outside_target, "outside secret\n").expect("outside target should be created");
-        symlink(&outside_target, record.transcript_dir.join("events.jsonl"))
+        let events_path = crate::transcript::TranscriptEventSource::from_record(&record)
+            .event_file_path_for_work_unit("survey");
+        fs::create_dir_all(events_path.parent().expect("event path parent"))
+            .expect("nested event directory should be created");
+        symlink(&outside_target, &events_path)
             .expect("symlinked events artifact should be created");
 
         let error = super::finalize_session_transcript(&record)
@@ -1716,11 +2162,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(record.transcript_dir.join("manifest.json"))
                 .expect("failure manifest should be written"),
-            "{\n  \"schema_version\": 1,\n  \"coverage\": \"finalization_failed\",\n  \"finalization_error\": \"unsafe transcript artifact: events.jsonl is not a regular file\"\n}\n"
+            "{\n  \"schema_version\": 1,\n  \"coverage\": \"finalization_failed\",\n  \"event_schema_versions\": [],\n  \"finalization_error\": \"unsafe transcript artifact: events.jsonl is not a regular file\"\n}\n"
         );
 
-        fs::remove_file(record.transcript_dir.join("events.jsonl"))
-            .expect("symlink should be removable");
+        fs::remove_file(events_path).expect("symlink should be removable");
         fs::remove_dir_all(root).expect("temporary audit root should be removed");
     }
 
@@ -1740,7 +2185,10 @@ mod tests {
             },
         )
         .expect("audit record should be created");
-        let fifo_path = record.transcript_dir.join("events.jsonl");
+        let fifo_path = crate::transcript::TranscriptEventSource::from_record(&record)
+            .event_file_path_for_work_unit("survey");
+        fs::create_dir_all(fifo_path.parent().expect("event path parent"))
+            .expect("nested event directory should be created");
         let status = Command::new("mkfifo")
             .arg(&fifo_path)
             .status()
@@ -1788,11 +2236,11 @@ mod tests {
             },
         )
         .expect("audit record should be created");
-        fs::write(
-            record.transcript_dir.join("events.jsonl"),
+        write_nested_events(
+            &record,
+            "survey",
             "{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\"}\n",
-        )
-        .expect("events jsonl should be created");
+        );
         fs::write(record.transcript_dir.join("transcript.md"), "preexisting\n")
             .expect("preexisting markdown should be created");
 
@@ -1840,11 +2288,11 @@ mod tests {
             },
         )
         .expect("audit record should be created");
-        fs::write(
-            record.transcript_dir.join("events.jsonl"),
+        write_nested_events(
+            &record,
+            "survey",
             "{\"schema_version\":1,\"source\":\"runa\",\"kind\":\"agent_input\"}\n",
-        )
-        .expect("events jsonl should be created");
+        );
         fs::write(record.transcript_dir.join("manifest.json"), "preexisting\n")
             .expect("preexisting manifest should be created");
 
@@ -1887,11 +2335,7 @@ mod tests {
             "kind": "agent_output",
             "content": content,
         });
-        fs::write(
-            record.transcript_dir.join("events.jsonl"),
-            format!("{event}\n"),
-        )
-        .expect("events jsonl should be writable");
+        write_nested_events(&record, "survey", &format!("{event}\n"));
 
         super::finalize_session_transcript(&record).expect("transcript should finalize");
 
@@ -1935,9 +2379,11 @@ mod tests {
         fs::create_dir_all(&root).expect("coverage fixture dir should be created");
         let events_path = root.join("events.jsonl");
         fs::write(&events_path, events).expect("coverage fixture should be written");
-        let mut events_file = fs::File::open(&events_path).expect("coverage fixture should open");
-        let coverage = super::transcript_coverage(&mut events_file)
+        let events_file = fs::File::open(&events_path).expect("coverage fixture should open");
+        let mut summary = super::TranscriptSummary::default();
+        super::summarize_transcript_events(events_file, &mut summary)
             .expect("coverage classification should run");
+        let coverage = summary.coverage();
         fs::remove_dir_all(root).expect("coverage fixture dir should be removed");
         coverage
     }
@@ -1977,7 +2423,10 @@ mod tests {
             },
         )
         .expect("audit record should be created");
-        let events_path = record.transcript_dir.join("events.jsonl");
+        let events_path = crate::transcript::TranscriptEventSource::from_record(&record)
+            .event_file_path_for_work_unit("survey");
+        fs::create_dir_all(events_path.parent().expect("event path parent"))
+            .expect("nested event directory should be created");
         let mut events_file =
             fs::File::create(&events_path).expect("large events should be created");
         let content = "x".repeat(512);
