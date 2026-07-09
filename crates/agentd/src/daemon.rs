@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
+use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -32,6 +33,8 @@ const SHUTDOWN_MESSAGE: &str = "agentd is shutting down";
 const MAX_PROGRESS_FRAME_BYTES: usize = 128 * 1024;
 const PROGRESS_QUEUE_CAPACITY: usize = 64;
 const PROGRESS_TERMINAL_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const SUMMARY_PREVIEW_CHARS: usize = 240;
+const SUMMARY_MAX_FIELDS: usize = 6;
 
 /// Startup or runtime failures for the foreground daemon loop.
 #[derive(Debug)]
@@ -93,9 +96,9 @@ pub enum ClientError {
 /// Client-side rendering level for live session observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveObservationLevel {
-    /// Print concise lifecycle markers while waiting for the terminal outcome.
+    /// Print compact followable transcript activity while waiting for the terminal outcome.
     Summary,
-    /// Print lifecycle markers with every field carried by the progress frame.
+    /// Print raw progress frame detail for live session inspection.
     Full,
 }
 
@@ -571,16 +574,124 @@ impl fmt::Display for OperatorField<'_> {
 }
 
 fn summarize_transcript_event(line: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|event| {
-            event
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                .filter(|kind| !kind.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "unparsed_event".to_string())
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+        return format!("unparsed_event {}", preview_field(line));
+    };
+    let Some(event) = event.as_object() else {
+        return format!("unparsed_event {}", preview_field(line));
+    };
+
+    let role = transcript_event_role(event);
+    if let Some(payload) = ["content", "message", "text"]
+        .iter()
+        .find_map(|key| nonempty_string_field(event, key))
+    {
+        return format!("{role} {}", preview_field(payload));
+    }
+
+    let fields = transcript_scalar_summary(event);
+    if fields.is_empty() {
+        format!("{role} {}", preview_field(line))
+    } else {
+        format!("{role} {}", fields.join(" "))
+    }
+}
+
+fn transcript_event_role(event: &serde_json::Map<String, serde_json::Value>) -> String {
+    let source = nonempty_string_field(event, "source");
+    let kind = nonempty_string_field(event, "kind");
+
+    match (source, kind) {
+        (Some(source), Some(kind)) => format!("{source}/{kind}"),
+        (None, Some(kind)) => kind.to_string(),
+        _ => "event".to_string(),
+    }
+}
+
+fn transcript_scalar_summary(event: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    const PRIORITY_FIELDS: &[&str] = &[
+        "protocol",
+        "action",
+        "tool",
+        "name",
+        "success",
+        "exit_code",
+        "signal",
+        "error",
+    ];
+    const RESERVED_FIELDS: &[&str] = &[
+        "schema_version",
+        "source",
+        "kind",
+        "content",
+        "message",
+        "text",
+    ];
+
+    let mut fields = Vec::new();
+    for key in PRIORITY_FIELDS {
+        if let Some(value) = scalar_field_display(event.get(*key)) {
+            fields.push(format!("{key}={value}"));
+        }
+    }
+
+    let mut other_keys = event
+        .keys()
+        .filter(|key| !PRIORITY_FIELDS.contains(&key.as_str()))
+        .filter(|key| !RESERVED_FIELDS.contains(&key.as_str()))
+        .collect::<Vec<_>>();
+    other_keys.sort();
+
+    for key in other_keys {
+        if fields.len() >= SUMMARY_MAX_FIELDS {
+            break;
+        }
+        if let Some(value) = scalar_field_display(event.get(key)) {
+            fields.push(format!("{key}={value}"));
+        }
+    }
+
+    fields
+}
+
+fn nonempty_string_field<'a>(
+    event: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    event
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn scalar_field_display(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) if !value.trim().is_empty() => {
+            Some(preview_field(value.trim()))
+        }
+        _ => None,
+    }
+}
+
+fn preview_field(value: &str) -> String {
+    let mut preview = String::new();
+    let mut chars = value.chars();
+
+    for _ in 0..SUMMARY_PREVIEW_CHARS {
+        let Some(character) = chars.next() else {
+            return preview;
+        };
+        preview.push(character);
+    }
+
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+
+    preview
 }
 
 fn handle_connection(stream: UnixStream, config: &Config, executor: &impl SessionExecutor) {
@@ -730,6 +841,7 @@ struct ProgressWriter {
     shared: Arc<ProgressWriterShared>,
     completion: mpsc::Receiver<Result<(), io::Error>>,
     handle: JoinHandle<()>,
+    abort_stream: UnixStream,
 }
 
 #[derive(Clone)]
@@ -760,6 +872,7 @@ enum ProgressWriterFrame {
 
 impl ProgressWriter {
     fn spawn(stream: UnixStream) -> Result<Self, io::Error> {
+        let abort_stream = stream.try_clone()?;
         let shared = Arc::new(ProgressWriterShared {
             state: Mutex::new(ProgressWriterState {
                 progress: VecDeque::new(),
@@ -791,6 +904,7 @@ impl ProgressWriter {
             shared,
             completion,
             handle,
+            abort_stream,
         })
     }
 
@@ -826,6 +940,8 @@ impl ProgressWriter {
                     timeout_ms = PROGRESS_TERMINAL_DRAIN_TIMEOUT.as_millis(),
                     "manual run progress writer did not drain the terminal response before the deadline"
                 );
+                abort_progress_writer(self.abort_stream);
+                join_progress_writer(self.handle);
                 Ok(())
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -946,6 +1062,16 @@ impl ProgressWriterSink {
                 );
             }
         }
+    }
+}
+
+fn abort_progress_writer(stream: UnixStream) {
+    if let Err(error) = stream.shutdown(Shutdown::Both) {
+        tracing::debug!(
+            event = "agentd.manual_run_progress_writer_abort_failed",
+            error = %error,
+            "failed to abort manual run progress writer stream"
+        );
     }
 }
 
@@ -1230,7 +1356,8 @@ fn read_pid(pid_file: &Path) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonError, LiveObservationLevel, ResponseMessage, reap_finished_handlers,
+        DaemonError, LiveObservationLevel, PROGRESS_QUEUE_CAPACITY,
+        PROGRESS_TERMINAL_DRAIN_TIMEOUT, ProgressWriter, ResponseMessage, reap_finished_handlers,
         run_daemon_until_shutdown_with_reconciler, write_response,
     };
     use crate::config::Config;
@@ -1251,6 +1378,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use std::{
+        os::fd::{AsRawFd, RawFd},
         os::unix::fs::FileTypeExt,
         os::unix::net::{UnixListener, UnixStream},
     };
@@ -1338,6 +1466,55 @@ source = "AGENTD_GITHUB_TOKEN"
         panic!("timed out waiting for {}", path.display());
     }
 
+    fn set_socket_buffer(stream: &UnixStream, option_name: libc::c_int, size: libc::c_int) {
+        let result = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                option_name,
+                (&size as *const libc::c_int).cast(),
+                std::mem::size_of_val(&size) as libc::socklen_t,
+            )
+        };
+        assert_eq!(
+            result,
+            0,
+            "failed to constrain socket buffer: {}",
+            io::Error::last_os_error()
+        );
+    }
+
+    fn unread_socket_bytes(stream: &UnixStream) -> usize {
+        let mut bytes: libc::c_int = 0;
+        let result = unsafe { libc::ioctl(stream.as_raw_fd(), libc::FIONREAD, &mut bytes) };
+        assert_eq!(
+            result,
+            0,
+            "failed to inspect unread socket bytes: {}",
+            io::Error::last_os_error()
+        );
+        usize::try_from(bytes).expect("unread byte count should be non-negative")
+    }
+
+    fn wait_for_unread_socket_bytes(stream: &UnixStream, minimum_unread_bytes: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if unread_socket_bytes(stream) >= minimum_unread_bytes {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "timed out waiting for {minimum_unread_bytes} unread socket bytes; last observed {}",
+            unread_socket_bytes(stream)
+        );
+    }
+
+    fn fd_is_open(fd: RawFd) -> bool {
+        unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+    }
+
     fn spawn_blocked_handler() -> (thread::JoinHandle<()>, Sender<()>) {
         let (tx, rx) = mpsc::channel();
         let handler = thread::spawn(move || {
@@ -1405,24 +1582,228 @@ source = "AGENTD_GITHUB_TOKEN"
     }
 
     #[test]
-    fn summary_progress_escapes_untrusted_transcript_event_kind_controls() {
+    fn progress_writer_finish_timeout_forces_stalled_writer_closed() {
+        let (daemon_stream, client_stream) =
+            UnixStream::pair().expect("stream pair should be created");
+        set_socket_buffer(&daemon_stream, libc::SO_SNDBUF, 4096);
+        set_socket_buffer(&client_stream, libc::SO_RCVBUF, 4096);
+        let daemon_fd = daemon_stream.as_raw_fd();
+        let writer = ProgressWriter::spawn(daemon_stream).expect("progress writer should spawn");
+        let sink = writer.sink();
+        let progress_line = format!(
+            r#"{{"schema_version":1,"source":"runa","kind":"agent_output","content":"{}"}}"#,
+            "x".repeat(96 * 1024)
+        );
+        for index in 0..PROGRESS_QUEUE_CAPACITY {
+            sink.enqueue_progress(ResponseMessage::Progress {
+                progress: ProgressMessage::TranscriptEvent {
+                    session_id: format!("stalled-session-{index}"),
+                    line: progress_line.clone(),
+                },
+            });
+        }
+        drop(sink);
+        wait_for_unread_socket_bytes(&client_stream, 4 * 1024);
+
+        let started = Instant::now();
+        writer
+            .finish(ResponseMessage::SessionOutcome {
+                outcome: SessionOutcome::Success { exit_code: 0 }.into(),
+            })
+            .expect("timeout cleanup should not fail daemon completion");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= PROGRESS_TERMINAL_DRAIN_TIMEOUT,
+            "test must exercise the terminal drain timeout path, completed in {elapsed:?}"
+        );
+        assert!(
+            elapsed < PROGRESS_TERMINAL_DRAIN_TIMEOUT + Duration::from_secs(5),
+            "terminal drain timeout cleanup should remain bounded, took {elapsed:?}"
+        );
+        assert!(
+            !fd_is_open(daemon_fd),
+            "finish must not return while a stalled progress writer still owns the stream fd"
+        );
+        drop(client_stream);
+    }
+
+    fn render_transcript_line(line: &str, level: LiveObservationLevel) -> String {
         let mut output = Vec::new();
 
         super::render_progress(
             ProgressMessage::TranscriptEvent {
                 session_id: "fake-session-1".to_string(),
-                line: "{\"kind\":\"agent_input\\nspoof\\u001b[2J\"}".to_string(),
+                line: line.to_string(),
             },
-            LiveObservationLevel::Summary,
+            level,
             &mut output,
         )
-        .expect("summary progress should render");
+        .expect("transcript progress should render");
 
-        let output = String::from_utf8(output).expect("summary progress should be utf8");
-        assert_eq!(output, "session event: agent_input\\nspoof\\u{1b}[2J\n");
+        String::from_utf8(output).expect("transcript progress should be utf8")
+    }
+
+    #[test]
+    fn summary_progress_renders_followable_transcript_activity() {
+        let cases = [
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"build the release checklist"}"#,
+                ["runa/agent_input", "build the release checklist"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_output","content":"reading repository state"}"#,
+                ["runa/agent_output", "reading repository state"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_stderr","message":"warning: retrying tool call"}"#,
+                ["runa/agent_stderr", "warning: retrying tool call"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","tool":"shell"}"#,
+                [
+                    "runa-mcp/tool_call",
+                    "protocol=mcp",
+                    "action=tools/call",
+                    "tool=shell",
+                ]
+                .as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"agent_exit","success":true,"exit_code":0}"#,
+                ["runa/agent_exit", "success=true", "exit_code=0"].as_slice(),
+            ),
+        ];
+
+        for (line, expected_parts) in cases {
+            let output = render_transcript_line(line, LiveObservationLevel::Summary);
+            for expected in expected_parts {
+                assert!(
+                    output.contains(expected),
+                    "summary output should contain {expected:?}: {output:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_observation_level_renders_followable_transcript_content() {
+        let line = r#"{"schema_version":1,"source":"runa","kind":"agent_output","content":"useful live payload"}"#;
+
+        for level in [LiveObservationLevel::Summary, LiveObservationLevel::Full] {
+            let output = render_transcript_line(line, level);
+            assert!(
+                output.contains("useful live payload"),
+                "{level:?} output should include transcript payload: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_progress_includes_session_context_and_raw_transcript_detail() {
+        let output = render_transcript_line(
+            r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","success":true,"content":"inspect"}"#,
+            LiveObservationLevel::Full,
+        );
+
+        for expected in [
+            "session_id=fake-session-1",
+            r#""source":"runa-mcp""#,
+            r#""kind":"tool_call""#,
+            r#""protocol":"mcp""#,
+            r#""action":"tools/call""#,
+            r#""success":true"#,
+            r#""content":"inspect""#,
+        ] {
+            assert!(
+                output.contains(expected),
+                "full output should contain raw detail {expected:?}: {output:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn transcript_fallbacks_remain_observable_at_every_level() {
+        let cases = [
+            (
+                "not json\nwith controls\u{1b}[2J",
+                ["unparsed_event", "not json\\nwith controls\\u{1b}[2J"].as_slice(),
+                ["not json\\nwith controls\\u{1b}[2J"].as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"source":"runa","kind":"heartbeat","sequence":7,"success":false}"#,
+                ["runa/heartbeat", "sequence=7", "success=false"].as_slice(),
+                [
+                    r#""kind":"heartbeat""#,
+                    r#""sequence":7"#,
+                    r#""success":false"#,
+                ]
+                .as_slice(),
+            ),
+            (
+                r#"{"schema_version":1,"kind":"custom_event","detail":"field summary"}"#,
+                ["custom_event", "detail=field summary"].as_slice(),
+                [r#""kind":"custom_event""#, r#""detail":"field summary""#].as_slice(),
+            ),
+        ];
+
+        for (line, summary_expected_parts, full_expected_parts) in cases {
+            let summary = render_transcript_line(line, LiveObservationLevel::Summary);
+            assert!(
+                summary.starts_with("session event: "),
+                "summary output should render a progress line: {summary:?}"
+            );
+            for expected in summary_expected_parts {
+                assert!(
+                    summary.contains(expected),
+                    "summary output should contain fallback detail {expected:?}: {summary:?}"
+                );
+            }
+            assert!(
+                !summary[..summary.len() - 1].contains('\n') && !summary.contains('\u{1b}'),
+                "summary output should escape fallback controls: {summary:?}"
+            );
+
+            let full = render_transcript_line(line, LiveObservationLevel::Full);
+            assert!(
+                full.starts_with("session event: session_id=fake-session-1 "),
+                "full output should include session context: {full:?}"
+            );
+            for expected in full_expected_parts {
+                assert!(
+                    full.contains(expected),
+                    "full output should contain raw detail {expected:?}: {full:?}"
+                );
+            }
+            assert!(
+                !full[..full.len() - 1].contains('\n') && !full.contains('\u{1b}'),
+                "full output should escape fallback controls: {full:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_progress_escapes_untrusted_display_fields_and_bounds_payloads() {
+        let output = render_transcript_line(
+            &format!(
+                r#"{{"source":"runa","kind":"agent_input\nspoof\u001b[2J","content":"{}"}}"#,
+                "x".repeat(600)
+            ),
+            LiveObservationLevel::Summary,
+        );
+
         assert!(
             !output[..output.len() - 1].contains('\n') && !output.contains('\u{1b}'),
             "summary output should not contain embedded terminal controls: {output:?}"
+        );
+        assert!(
+            output.len() < 360,
+            "summary output should keep long payload previews bounded: {} bytes",
+            output.len()
+        );
+        assert!(
+            output.contains("agent_input\\nspoof\\u{1b}[2J") && output.contains("xxx"),
+            "summary output should retain escaped role and payload preview: {output:?}"
         );
     }
 

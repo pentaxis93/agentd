@@ -57,8 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator prompt, collecting the statement and optional target before reusing
   the existing canonical intent intake.
 - `agentd wish` and `agentd run` now stream live session progress in the
-  invoking terminal, with `--progress summary` as the default and
-  `--progress full` for raw transcript event detail while the session executes.
+  invoking terminal, with `--progress summary` as the default compact
+  transcript activity view and `--progress full` for raw transcript event detail
+  while the session executes.
 
 ### Changed
 

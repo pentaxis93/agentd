@@ -100,7 +100,7 @@ struct BlockingFirstRunExecutor {
     state: Arc<BlockingFirstRunState>,
     first_outcome: SessionOutcome,
     later_outcome: SessionOutcome,
-    first_progress_line: Option<String>,
+    first_progress_lines: Vec<String>,
 }
 
 struct BlockingFirstRunState {
@@ -111,9 +111,6 @@ struct BlockingFirstRunState {
 
 const SATURATING_PROGRESS_EVENTS: usize = 256;
 const SMALL_SOCKET_RECEIVE_BUFFER_BYTES: libc::c_int = 4096;
-// This reproduces the rejected dade8ed writer timeout path; production no longer has it.
-const LEGACY_PROGRESS_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
-
 #[derive(Clone)]
 struct BlockingBurstProgressExecutor {
     state: Arc<BlockingBurstProgressState>,
@@ -193,12 +190,18 @@ impl BlockingFirstRunExecutor {
             }),
             first_outcome,
             later_outcome,
-            first_progress_line: None,
+            first_progress_lines: Vec::new(),
         }
     }
 
     fn with_first_progress_line(mut self, line: &str) -> Self {
-        self.first_progress_line = Some(line.to_string());
+        self.first_progress_lines.push(line.to_string());
+        self
+    }
+
+    fn with_first_progress_lines(mut self, lines: &[&str]) -> Self {
+        self.first_progress_lines
+            .extend(lines.iter().map(|line| (*line).to_string()));
         self
     }
 
@@ -237,7 +240,7 @@ impl SessionExecutor for BlockingFirstRunExecutor {
             started_cvar.notify_all();
             drop(started);
 
-            if let Some(line) = &self.first_progress_line {
+            for line in &self.first_progress_lines {
                 progress.observe(SessionProgressEvent::TranscriptEvent {
                     session_id: "fake-session-1".to_string(),
                     line: line.clone(),
@@ -488,9 +491,11 @@ fn client_receives_execution_progress_while_session_is_still_running() {
         SessionOutcome::Success { exit_code: 0 },
         SessionOutcome::Success { exit_code: 0 },
     )
-    .with_first_progress_line(
+    .with_first_progress_lines(&[
         r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
-    );
+        r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","tool":"shell"}"#,
+        r#"{"schema_version":1,"source":"runa","kind":"agent_exit","success":true,"exit_code":0}"#,
+    ]);
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
         run_daemon_until_shutdown_for_test(daemon_config, daemon_executor, daemon_shutdown)
@@ -517,7 +522,7 @@ fn client_receives_execution_progress_while_session_is_still_running() {
     executor.wait_for_first_run_to_start();
     let mut progress = String::new();
     let deadline = Instant::now() + Duration::from_secs(1);
-    while !progress.contains("session event: agent_input") {
+    while !progress.contains("success=true") {
         let remaining = deadline.saturating_duration_since(Instant::now());
         assert!(
             !remaining.is_zero(),
@@ -529,10 +534,16 @@ fn client_receives_execution_progress_while_session_is_still_running() {
                 .expect("execution progress should reach the client before the session completes"),
         );
     }
-    assert!(
-        progress.contains("session event: agent_input"),
-        "unexpected progress output: {progress}"
-    );
+    for expected in [
+        "session event: runa/agent_input working step",
+        "session event: runa-mcp/tool_call protocol=mcp action=tools/call tool=shell",
+        "session event: runa/agent_exit success=true exit_code=0",
+    ] {
+        assert!(
+            progress.contains(expected),
+            "default summary progress should include followable transcript detail {expected:?}: {progress}"
+        );
+    }
     assert!(
         !client_request.is_finished(),
         "client should still be waiting for the terminal outcome after progress arrives"
@@ -575,7 +586,7 @@ fn client_full_progress_includes_raw_execution_event_detail() {
         SessionOutcome::Success { exit_code: 0 },
     )
     .with_first_progress_line(
-        r#"{"schema_version":1,"source":"runa","kind":"agent_input","content":"working step"}"#,
+        r#"{"schema_version":1,"source":"runa-mcp","kind":"tool_call","protocol":"mcp","action":"tools/call","success":true,"content":"working step"}"#,
     );
     let daemon_executor = executor.clone();
     let handle = thread::spawn(move || {
@@ -616,6 +627,18 @@ fn client_full_progress_includes_raw_execution_event_detail() {
         );
     }
     assert!(progress.contains("session_id=fake-session-1"), "{progress}");
+    for expected in [
+        r#""source":"runa-mcp""#,
+        r#""kind":"tool_call""#,
+        r#""protocol":"mcp""#,
+        r#""action":"tools/call""#,
+        r#""success":true"#,
+    ] {
+        assert!(
+            progress.contains(expected),
+            "full progress should include raw event detail {expected:?}: {progress}"
+        );
+    }
     assert!(
         !client_request.is_finished(),
         "client should still be waiting for the terminal outcome after full progress arrives"
@@ -641,14 +664,14 @@ fn client_full_progress_includes_raw_execution_event_detail() {
 }
 
 #[test]
-fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcome() {
+fn non_reading_progress_client_does_not_block_daemon_completion() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
     }
-    let runtime_dir = unique_runtime_dir("slow-reading-progress-client");
+    let runtime_dir = unique_runtime_dir("non-reading-progress-client");
     let config = config_in_runtime_dir(&runtime_dir);
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
@@ -684,51 +707,15 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
     });
     executor.release();
 
-    thread::sleep(LEGACY_PROGRESS_WRITE_TIMEOUT + Duration::from_secs(15));
-
     let mut client = client.take().expect("client should still be connected");
     let response = read_response_stream(&mut client);
-
-    let response = String::from_utf8(response).expect("daemon response should be utf8 JSONL");
     assert!(
-        response.ends_with('\n'),
-        "daemon must not emit an unterminated JSONL tail under progress backpressure: last bytes {:?}",
-        response
-            .as_bytes()
-            .iter()
-            .rev()
-            .take(32)
-            .copied()
-            .collect::<Vec<_>>()
-    );
-    let lines: Vec<&str> = response.lines().collect();
-    assert!(
-        !lines.is_empty(),
-        "daemon should write at least the terminal response"
-    );
-    let mut progress_frames = 0_usize;
-    let mut saw_terminal_outcome = false;
-    for line in &lines {
-        let value: serde_json::Value =
-            serde_json::from_str(line).expect("daemon must not emit partial JSON frames");
-        match value.get("type").and_then(serde_json::Value::as_str) {
-            Some("progress") => progress_frames += 1,
-            Some("session_outcome") => saw_terminal_outcome = true,
-            other => panic!("unexpected response type after saturated progress writes: {other:?}"),
-        }
-    }
-    assert!(
-        saw_terminal_outcome,
-        "terminal outcome must survive slow-reader progress backpressure; parsed {} lines with {progress_frames} progress frames",
-        lines.len()
-    );
-    assert!(
-        progress_frames < SATURATING_PROGRESS_EVENTS,
-        "slow-reading client should force progress drops, got all {progress_frames} frames"
+        !response.is_empty(),
+        "daemon should have written progress before abandoning the stalled response"
     );
     let join_result = join_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("daemon should join after bounded slow-reader drain");
+        .expect("daemon should join after bounded non-reader cleanup");
     joiner.join().expect("join helper should join");
     join_result.expect("daemon should exit cleanly");
     unsafe {

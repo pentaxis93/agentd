@@ -433,6 +433,12 @@ fn binary_run_help_shows_socket_path_and_not_config() {
         "run help should document live progress verbosity: {stdout}"
     );
     assert!(
+        stdout.contains(
+            "Live observation:\n  agentd run streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail."
+        ),
+        "run help should describe summary and full transcript rendering: {stdout}"
+    );
+    assert!(
         !stdout.contains("--config"),
         "run help should not advertise daemon config coupling: {stdout}"
     );
@@ -492,7 +498,7 @@ fn binary_wish_help_shows_evocative_intent_prompting_surface() {
     );
     assert!(
         stdout.contains(
-            "Live observation:\n  agentd wish streams concise transcript progress by default while the session executes. Use --progress full for raw event detail.\n\nPrompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
+            "Live observation:\n  agentd wish streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.\n\nPrompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
         ),
         "wish help should document the exact prompt block: {stdout}"
     );
