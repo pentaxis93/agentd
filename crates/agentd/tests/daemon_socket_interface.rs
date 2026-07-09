@@ -421,11 +421,11 @@ fn daemon_round_trips_work_unit_artifact_input_through_the_socket_protocol() {
         &RunRequest {
             agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
-            work_unit: Some("issue-76".to_string()),
+            work_unit: Some("76".to_string()),
             input: Some(InvocationInput::Artifact {
                 artifact_type: "work-unit".to_string(),
-                artifact_id: "issue-76".to_string(),
-                document: json!({ "id": "issue-76" }),
+                artifact_id: "76".to_string(),
+                document: json!({ "id": "76" }),
             }),
         },
     )
@@ -433,13 +433,13 @@ fn daemon_round_trips_work_unit_artifact_input_through_the_socket_protocol() {
 
     assert_eq!(outcome, SessionOutcome::Success { exit_code: 0 });
     let invocation = invocations.lock().expect("invocations should lock")[0].clone();
-    assert_eq!(invocation.work_unit.as_deref(), Some("issue-76"));
+    assert_eq!(invocation.work_unit.as_deref(), Some("76"));
     assert_eq!(
         invocation.input,
         Some(InvocationInput::Artifact {
             artifact_type: "work-unit".to_string(),
-            artifact_id: "issue-76".to_string(),
-            document: json!({ "id": "issue-76" }),
+            artifact_id: "76".to_string(),
+            document: json!({ "id": "76" }),
         })
     );
 
@@ -476,7 +476,7 @@ fn daemon_rejects_conflicting_work_unit_and_input_from_socket_callers() {
         &RunRequest {
             agent: "site-builder".to_string(),
             repo_url: Some("https://example.com/repo.git".to_string()),
-            work_unit: Some("issue-42".to_string()),
+            work_unit: Some("42".to_string()),
             input: Some(InvocationInput::IntentText {
                 statement: "Add a status page".to_string(),
                 target: None,

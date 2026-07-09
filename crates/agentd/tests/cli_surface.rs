@@ -735,7 +735,7 @@ fn binary_run_command_rejects_intent_when_work_unit_is_also_supplied() {
             "site-builder",
             "https://example.com/repo.git",
             "--work-unit",
-            "issue-81",
+            "81",
             "--intent",
             "Add a status page",
         ])
@@ -1106,12 +1106,9 @@ fn binary_run_command_forwards_work_unit_with_matching_artifact_file() {
         "client-command-work-unit-artifact-input",
         &daemon_test_config(&socket_path, &pid_file),
     );
-    let artifact_path = runtime_dir.join("issue-76.json");
-    std::fs::write(
-        &artifact_path,
-        r#"{"id":"issue-76","title":"Execute work mode"}"#,
-    )
-    .expect("artifact file should be written");
+    let artifact_path = runtime_dir.join("76.json");
+    std::fs::write(&artifact_path, r#"{"id":"76","title":"Execute work mode"}"#)
+        .expect("artifact file should be written");
     let (shutdown, handle, _config, invocations) =
         start_recording_test_daemon(&config_path, SessionOutcome::Success { exit_code: 0 });
 
@@ -1123,7 +1120,7 @@ fn binary_run_command_forwards_work_unit_with_matching_artifact_file() {
             "site-builder",
             "https://example.com/repo.git",
             "--work-unit",
-            "issue-76",
+            "76",
             "--artifact-type",
             "work-unit",
             "--artifact-file",
@@ -1147,14 +1144,14 @@ fn binary_run_command_forwards_work_unit_with_matching_artifact_file() {
     );
 
     let invocation = invocations.lock().expect("invocations should lock")[0].clone();
-    assert_eq!(invocation.work_unit.as_deref(), Some("issue-76"));
+    assert_eq!(invocation.work_unit.as_deref(), Some("76"));
     assert_eq!(
         invocation.input,
         Some(InvocationInput::Artifact {
             artifact_type: "work-unit".to_string(),
-            artifact_id: "issue-76".to_string(),
+            artifact_id: "76".to_string(),
             document: json!({
-                "id": "issue-76",
+                "id": "76",
                 "title": "Execute work mode",
             }),
         })
@@ -1648,7 +1645,7 @@ fn binary_wish_command_seeds_work_unit_arm_and_skips_prose_elicitation() {
             "site-builder",
             "https://example.com/repo.git",
             "--work-unit",
-            "issue-81",
+            "81",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1678,13 +1675,13 @@ fn binary_wish_command_seeds_work_unit_arm_and_skips_prose_elicitation() {
     let invocation = invocations.lock().expect("invocations should lock")[0].clone();
     assert_eq!(
         invocation.work_unit.as_deref(),
-        Some("issue-81"),
+        Some("81"),
         "wish work-unit arm should enter the reference as a work-unit"
     );
     assert_eq!(
         invocation.input, None,
-        "wish work-unit arm should reach the same downstream shape as `run --work-unit`: \
-         a work-unit with no invocation input"
+        "wish work-unit arm should reach the same downstream request shape as `run --work-unit`: \
+         a work-unit reference with no explicit invocation input"
     );
 }
 

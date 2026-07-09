@@ -414,7 +414,7 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
-            work_unit: Some("task-42".to_string()),
+            work_unit: Some("42".to_string()),
             input: None,
             timeout: None,
         },
@@ -451,8 +451,23 @@ fn build_container_script_creates_home_workspace_initializes_runa_and_runs_agent
     ));
     assert!(!script.contains(".runa/config.toml"));
     assert!(script.contains(
-        "\nexec gosu 'myagent:myagent' runa run --work-unit 'task-42' --agent-command -- 'site-builder' 'exec' '--sandbox' 'workspace-write'"
+        "\ngosu 'myagent:myagent' mkdir -p '/home/myagent/repo/.runa/workspace/intent'\n"
     ));
+    assert!(
+        script.contains("\"target\":\"42\"")
+            && script.contains("/home/myagent/repo/.runa/workspace/intent/operator-input.json"),
+        "work-unit reference should be materialized as a target-bearing intent: {script}"
+    );
+    assert!(
+        script.contains(
+            "\nexec gosu 'myagent:myagent' runa run --agent-command -- 'site-builder' 'exec' '--sandbox' 'workspace-write'"
+        ),
+        "work-unit reference should enter runa's resolving path instead of --work-unit: {script}"
+    );
+    assert!(
+        !script.contains("runa run --work-unit"),
+        "work-unit reference must not use runa's pre-bound --work-unit path: {script}"
+    );
 }
 
 #[test]
@@ -533,13 +548,13 @@ fn build_container_script_materializes_work_unit_input_before_work_mode_run() {
         &SessionInvocation {
             repo_url: VALID_REMOTE_REPO_URL.to_string(),
             repo_token: None,
-            work_unit: Some("issue-76".to_string()),
+            work_unit: Some("76".to_string()),
             input: None,
             timeout: None,
         },
         Some(&ResolvedInvocationInput {
             artifact_type: "work-unit".to_string(),
-            artifact_id: "issue-76".to_string(),
+            artifact_id: "76".to_string(),
             document_json: "{}\n".to_string(),
         }),
     );
@@ -547,12 +562,23 @@ fn build_container_script_materializes_work_unit_input_before_work_mode_run() {
     let materialize_offset = script
         .find("workspace/work-unit")
         .expect("script should materialize the work-unit artifact");
+    let seed_offset = script
+        .find("workspace/intent")
+        .expect("script should materialize the work-unit reference seed");
     let run_offset = script
-        .find("runa run --work-unit 'issue-76'")
-        .expect("script should run the selected work unit");
+        .find("runa run --agent-command")
+        .expect("script should run through the resolving entry path");
     assert!(
         materialize_offset < run_offset,
         "work-unit artifact should be materialized before work-mode run: {script}"
+    );
+    assert!(
+        seed_offset < run_offset,
+        "work-unit reference seed should be materialized before runa run resolves it: {script}"
+    );
+    assert!(
+        !script.contains("runa run --work-unit"),
+        "work-unit artifact input must still enter through the resolving path: {script}"
     );
 }
 

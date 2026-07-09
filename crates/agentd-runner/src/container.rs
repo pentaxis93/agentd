@@ -8,7 +8,9 @@
 //! --attach` is ambiguous (podman infrastructure error vs. container process)
 //! and requires container state inspection to disambiguate.
 
-use crate::input::{INVOCATION_INPUT_MOUNT_PATH, ResolvedInvocationInput};
+use crate::input::{
+    INVOCATION_INPUT_MOUNT_PATH, ResolvedInvocationInput, work_unit_seed_resolved_input,
+};
 use crate::lifecycle::{LifecycleFailureKind, log_lifecycle_failure};
 use crate::podman::{run_podman_command, run_podman_command_until};
 use crate::resources::{SecretBinding, SessionResources, cleanup_podman_secrets};
@@ -271,31 +273,67 @@ fn build_container_script(
     script.push_str(" runa init --methodology ");
     script.push_str(&shell_quote(METHODOLOGY_MANIFEST_PATH));
     if let Some(resolved_input) = resolved_input {
-        let workspace_dir = format!("{repo_runa_dir}/workspace/{}", resolved_input.artifact_type);
-        let artifact_path = format!("{workspace_dir}/{}.json", resolved_input.artifact_id);
-        let staged_document_path = format!("{INVOCATION_INPUT_MOUNT_PATH}/document.json");
-        script.push_str("\ngosu ");
-        script.push_str(&shell_quote(&user_group));
-        script.push_str(" mkdir -p ");
-        script.push_str(&shell_quote(&workspace_dir));
-        script.push_str("\ngosu ");
-        script.push_str(&shell_quote(&user_group));
-        script.push_str(" cp ");
-        script.push_str(&shell_quote(&staged_document_path));
-        script.push(' ');
-        script.push_str(&shell_quote(&artifact_path));
+        append_staged_input_materialization(
+            &mut script,
+            &user_group,
+            &repo_runa_dir,
+            resolved_input,
+        );
+    }
+    if let Some(work_unit) = &invocation.work_unit {
+        let seed_input = work_unit_seed_resolved_input(work_unit);
+        append_inline_input_materialization(&mut script, &user_group, &repo_runa_dir, &seed_input);
     }
     script.push_str("\nexec gosu ");
     script.push_str(&shell_quote(&user_group));
     script.push_str(" runa run");
-    if let Some(work_unit) = &invocation.work_unit {
-        script.push_str(" --work-unit ");
-        script.push_str(&shell_quote(work_unit));
-    }
     script.push_str(" --agent-command -- ");
     script.push_str(&shell_join(&spec.agent_command));
 
     script
+}
+
+fn append_staged_input_materialization(
+    script: &mut String,
+    user_group: &str,
+    repo_runa_dir: &str,
+    resolved_input: &ResolvedInvocationInput,
+) {
+    let workspace_dir = format!("{repo_runa_dir}/workspace/{}", resolved_input.artifact_type);
+    let artifact_path = format!("{workspace_dir}/{}.json", resolved_input.artifact_id);
+    let staged_document_path = format!("{INVOCATION_INPUT_MOUNT_PATH}/document.json");
+    script.push_str("\ngosu ");
+    script.push_str(&shell_quote(user_group));
+    script.push_str(" mkdir -p ");
+    script.push_str(&shell_quote(&workspace_dir));
+    script.push_str("\ngosu ");
+    script.push_str(&shell_quote(user_group));
+    script.push_str(" cp ");
+    script.push_str(&shell_quote(&staged_document_path));
+    script.push(' ');
+    script.push_str(&shell_quote(&artifact_path));
+}
+
+fn append_inline_input_materialization(
+    script: &mut String,
+    user_group: &str,
+    repo_runa_dir: &str,
+    resolved_input: &ResolvedInvocationInput,
+) {
+    let workspace_dir = format!("{repo_runa_dir}/workspace/{}", resolved_input.artifact_type);
+    let artifact_path = format!("{workspace_dir}/{}.json", resolved_input.artifact_id);
+    let mut write_command = String::from("printf %s ");
+    write_command.push_str(&shell_quote(&resolved_input.document_json));
+    write_command.push_str(" > ");
+    write_command.push_str(&shell_quote(&artifact_path));
+    script.push_str("\ngosu ");
+    script.push_str(&shell_quote(user_group));
+    script.push_str(" mkdir -p ");
+    script.push_str(&shell_quote(&workspace_dir));
+    script.push_str("\ngosu ");
+    script.push_str(&shell_quote(user_group));
+    script.push_str(" /bin/sh -c ");
+    script.push_str(&shell_quote(&write_command));
 }
 
 fn build_home_ownership_command(

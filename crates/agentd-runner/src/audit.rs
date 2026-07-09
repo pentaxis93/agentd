@@ -921,7 +921,7 @@ mod tests {
             &SessionInvocation {
                 repo_url: "https://example.com/agentd.git".to_string(),
                 repo_token: None,
-                work_unit: Some("issue-76".to_string()),
+                work_unit: Some("76".to_string()),
                 input: None,
                 timeout: None,
             },
@@ -936,7 +936,7 @@ mod tests {
         assert_eq!(json["session_id"], "0123456789abcdef");
         assert_eq!(json["agent"], "site-builder");
         assert_eq!(json["repo_url"], "https://example.com/agentd.git");
-        assert_eq!(json["work_unit"], "issue-76");
+        assert_eq!(json["work_unit"], "76");
         assert!(json.get("end_timestamp").is_none());
         assert!(json.get("outcome").is_none());
         assert!(json.get("exit_code").is_none());

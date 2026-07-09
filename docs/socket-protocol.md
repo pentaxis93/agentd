@@ -47,7 +47,7 @@ materialized intent artifact. `agentd wish` can populate it from the optional
 target prompt; `agentd run --intent` has no target flag.
 
 ```json
-{"Artifact": {"artifact_type": "work-unit", "artifact_id": "issue-42", "document": { "...": "..." }}}
+{"Artifact": {"artifact_type": "work-unit", "artifact_id": "42", "document": { "...": "..." }}}
 ```
 
 `IntentText` is synthesized into a canonical intent artifact
