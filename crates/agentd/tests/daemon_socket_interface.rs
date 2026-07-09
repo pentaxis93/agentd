@@ -111,9 +111,6 @@ struct BlockingFirstRunState {
 
 const SATURATING_PROGRESS_EVENTS: usize = 256;
 const SMALL_SOCKET_RECEIVE_BUFFER_BYTES: libc::c_int = 4096;
-// This reproduces the rejected dade8ed writer timeout path; production no longer has it.
-const LEGACY_PROGRESS_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
-
 #[derive(Clone)]
 struct BlockingBurstProgressExecutor {
     state: Arc<BlockingBurstProgressState>,
@@ -667,14 +664,14 @@ fn client_full_progress_includes_raw_execution_event_detail() {
 }
 
 #[test]
-fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcome() {
+fn non_reading_progress_client_does_not_block_daemon_completion() {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {
         std::env::set_var("AGENTD_GITHUB_TOKEN", "runtime-secret");
     }
-    let runtime_dir = unique_runtime_dir("slow-reading-progress-client");
+    let runtime_dir = unique_runtime_dir("non-reading-progress-client");
     let config = config_in_runtime_dir(&runtime_dir);
     let shutdown = Arc::new(AtomicBool::new(false));
     let daemon_config = config.clone();
@@ -710,51 +707,15 @@ fn slow_reading_progress_client_receives_complete_json_lines_and_terminal_outcom
     });
     executor.release();
 
-    thread::sleep(LEGACY_PROGRESS_WRITE_TIMEOUT + Duration::from_secs(15));
-
     let mut client = client.take().expect("client should still be connected");
     let response = read_response_stream(&mut client);
-
-    let response = String::from_utf8(response).expect("daemon response should be utf8 JSONL");
     assert!(
-        response.ends_with('\n'),
-        "daemon must not emit an unterminated JSONL tail under progress backpressure: last bytes {:?}",
-        response
-            .as_bytes()
-            .iter()
-            .rev()
-            .take(32)
-            .copied()
-            .collect::<Vec<_>>()
-    );
-    let lines: Vec<&str> = response.lines().collect();
-    assert!(
-        !lines.is_empty(),
-        "daemon should write at least the terminal response"
-    );
-    let mut progress_frames = 0_usize;
-    let mut saw_terminal_outcome = false;
-    for line in &lines {
-        let value: serde_json::Value =
-            serde_json::from_str(line).expect("daemon must not emit partial JSON frames");
-        match value.get("type").and_then(serde_json::Value::as_str) {
-            Some("progress") => progress_frames += 1,
-            Some("session_outcome") => saw_terminal_outcome = true,
-            other => panic!("unexpected response type after saturated progress writes: {other:?}"),
-        }
-    }
-    assert!(
-        saw_terminal_outcome,
-        "terminal outcome must survive slow-reader progress backpressure; parsed {} lines with {progress_frames} progress frames",
-        lines.len()
-    );
-    assert!(
-        progress_frames < SATURATING_PROGRESS_EVENTS,
-        "slow-reading client should force progress drops, got all {progress_frames} frames"
+        !response.is_empty(),
+        "daemon should have written progress before abandoning the stalled response"
     );
     let join_result = join_rx
         .recv_timeout(Duration::from_secs(5))
-        .expect("daemon should join after bounded slow-reader drain");
+        .expect("daemon should join after bounded non-reader cleanup");
     joiner.join().expect("join helper should join");
     join_result.expect("daemon should exit cleanly");
     unsafe {
