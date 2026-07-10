@@ -1372,7 +1372,7 @@ mod tests {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::sync::mpsc::Sender;
     use std::thread;
@@ -1515,12 +1515,26 @@ source = "AGENTD_GITHUB_TOKEN"
         unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
     }
 
-    fn spawn_blocked_handler() -> (thread::JoinHandle<()>, Sender<()>) {
-        let (tx, rx) = mpsc::channel();
+    /// A blocked handler that probes the join ordering directly: when it
+    /// wakes, it reports whether `shutdown_daemon` had already returned. When
+    /// the join is in place the handler wakes strictly before the join can
+    /// return, so the probe deterministically observes `false`; a
+    /// `shutdown_daemon` that returns without joining is observed as `true`.
+    /// The report doubles as the handler's completion signal.
+    fn spawn_ordering_probe_handler(
+        shutdown_returned: Arc<AtomicBool>,
+    ) -> (thread::JoinHandle<()>, Sender<()>, mpsc::Receiver<bool>) {
+        let (release_tx, release_rx) = mpsc::channel();
+        let (report_tx, report_rx) = mpsc::channel();
         let handler = thread::spawn(move || {
-            rx.recv().expect("blocked thread should be released");
+            release_rx
+                .recv()
+                .expect("blocked handler should be released");
+            report_tx
+                .send(shutdown_returned.load(Ordering::SeqCst))
+                .expect("ordering probe report should be received");
         });
-        (handler, tx)
+        (handler, release_tx, report_rx)
     }
 
     #[test]
@@ -1863,28 +1877,51 @@ source = "AGENTD_GITHUB_TOKEN"
 
     #[test]
     fn finishing_after_accept_error_waits_for_in_flight_handlers() {
-        let (handler, tx) = spawn_blocked_handler();
+        let shutdown_returned = Arc::new(AtomicBool::new(false));
+        let (handler, release_tx, report_rx) =
+            spawn_ordering_probe_handler(Arc::clone(&shutdown_returned));
+        // The handler is released only after `shutdown_daemon` has begun its
+        // cleanup (`begin_shutdown` runs before handlers are joined), so the
+        // handler is genuinely in flight when the join starts, regardless of
+        // scheduling.
+        let (cleanup_tx, cleanup_rx) = mpsc::channel();
         let releaser = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            tx.send(()).expect("blocked thread should be released");
+            cleanup_rx
+                .recv()
+                .expect("shutdown cleanup should signal before handlers are joined");
+            release_tx
+                .send(())
+                .expect("blocked handler should be released");
         });
 
-        let start = Instant::now();
         let error = super::shutdown_daemon(
             Arc::new(AtomicBool::new(false)).as_ref(),
-            || Ok(()),
+            move || {
+                cleanup_tx
+                    .send(())
+                    .expect("release helper should be waiting for the cleanup signal");
+                Ok(())
+            },
             vec![handler],
             None,
             Err(io::Error::other("accept failed")),
         )
         .expect_err("accept error should be returned");
+        shutdown_returned.store(true, Ordering::SeqCst);
 
         releaser
             .join()
             .expect("release helper thread should join cleanly");
+        // Happens-before verdict: with the join in place the handler's probe
+        // runs strictly before `shutdown_daemon` can return, so it observes
+        // `false`; a return that skipped the join is observed as `true`.
+        // Receiving the report also proves the handler ran to completion.
+        let returned_before_handler = report_rx
+            .recv()
+            .expect("in-flight handler should complete and report");
         assert!(
-            start.elapsed() >= Duration::from_millis(100),
-            "cleanup should wait for the blocked handler before returning"
+            !returned_before_handler,
+            "shutdown_daemon returned while its in-flight handler was still blocked"
         );
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(error.to_string(), "accept failed");
@@ -1892,16 +1929,28 @@ source = "AGENTD_GITHUB_TOKEN"
 
     #[test]
     fn finishing_after_shutdown_error_still_joins_handlers() {
-        let (handler, tx) = spawn_blocked_handler();
+        let shutdown_returned = Arc::new(AtomicBool::new(false));
+        let (handler, release_tx, report_rx) =
+            spawn_ordering_probe_handler(Arc::clone(&shutdown_returned));
+        // The handler is released only after the failing cleanup has run, so
+        // the join that follows a cleanup error is exercised against a handler
+        // that is still in flight, regardless of scheduling.
+        let (cleanup_tx, cleanup_rx) = mpsc::channel();
         let releaser = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            tx.send(()).expect("blocked thread should be released");
+            cleanup_rx
+                .recv()
+                .expect("shutdown cleanup should signal before handlers are joined");
+            release_tx
+                .send(())
+                .expect("blocked handler should be released");
         });
 
-        let start = Instant::now();
         let error = super::shutdown_daemon(
             Arc::new(AtomicBool::new(false)).as_ref(),
-            || {
+            move || {
+                cleanup_tx
+                    .send(())
+                    .expect("release helper should be waiting for the cleanup signal");
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "cleanup failed",
@@ -1912,13 +1961,21 @@ source = "AGENTD_GITHUB_TOKEN"
             Ok(()),
         )
         .expect_err("cleanup failure should be returned");
+        shutdown_returned.store(true, Ordering::SeqCst);
 
         releaser
             .join()
             .expect("release helper thread should join cleanly");
+        // Happens-before verdict: even on the cleanup-error path, the join
+        // orders the handler's probe strictly before `shutdown_daemon`'s
+        // return, so it observes `false`; a return that skipped the join is
+        // observed as `true`. Receiving the report proves the handler ran.
+        let returned_before_handler = report_rx
+            .recv()
+            .expect("in-flight handler should complete and report");
         assert!(
-            start.elapsed() >= Duration::from_millis(100),
-            "cleanup failure should not skip joining blocked handlers"
+            !returned_before_handler,
+            "shutdown_daemon returned while its in-flight handler was still blocked"
         );
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(error.to_string(), "cleanup failed");
