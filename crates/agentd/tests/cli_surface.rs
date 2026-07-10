@@ -408,120 +408,204 @@ fn binary_bare_command_with_config_starts_daemon_mode() {
     );
 }
 
-#[test]
-fn binary_run_help_shows_socket_path_and_not_config() {
+fn assert_help(args: &[&str], expected: &str) {
     let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
-        .args(["run", "--help"])
+        .args(args)
         .output()
         .expect("agentd binary should run");
 
     assert!(
         output.status.success(),
-        "run help should exit successfully: {}",
+        "help {args:?} should exit successfully: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
-    assert!(
-        stdout.contains("--socket-path"),
-        "run help should advertise socket override: {stdout}"
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr should be valid UTF-8"),
+        ""
     );
-    assert!(
-        stdout.contains("--progress <PROGRESS>")
-            && stdout.contains("summary")
-            && stdout.contains("full"),
-        "run help should document live progress verbosity: {stdout}"
-    );
-    assert!(
-        stdout.contains(
-            "Live observation:\n  agentd run streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail."
-        ),
-        "run help should describe summary and full transcript rendering: {stdout}"
-    );
-    assert!(
-        !stdout.contains("--config"),
-        "run help should not advertise daemon config coupling: {stdout}"
-    );
-    assert!(
-        stdout.contains("--work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"),
-        "run help should document work-mode artifact invocation: {stdout}"
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be valid UTF-8"),
+        expected
     );
 }
 
+const ROOT_HELP: &str = r#"Run the agentd service or submit agent sessions through it.
+
+With no subcommand, agentd starts the foreground daemon using /etc/agentd/agentd.toml. Use daemon to make service startup explicit, run to submit one manual session request, or wish for guided desired-state entry.
+
+Usage: agentd [OPTIONS] [COMMAND]
+
+Commands:
+  daemon  Start the foreground service that accepts and supervises agent sessions
+  run     Submit one manual session request, with optional invocation input
+  wish    Elicit a desired state or select a work unit, then seed one agent session
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --config <CONFIG>
+          Load daemon configuration from this path when starting the service [default: /etc/agentd/agentd.toml]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Examples:
+  agentd
+  agentd --config <PATH>
+"#;
+
 #[test]
-fn binary_top_level_help_shows_wish_operator_verb() {
-    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
-        .arg("--help")
-        .output()
-        .expect("agentd binary should run");
-
-    assert!(
-        output.status.success(),
-        "help should exit successfully: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
-    assert!(
-        stdout.contains("wish"),
-        "top-level help should advertise the wish operator verb: {stdout}"
-    );
+fn binary_root_help_matches_the_invocation_contract_exactly() {
+    assert_help(&["--help"], ROOT_HELP);
 }
 
+const DAEMON_HELP: &str = r#"Run the foreground agentd service that accepts manual and scheduled session requests over its control socket and supervises their execution.
+
+Use daemon to start the service. Use run for direct manual submission or wish for guided desired-state entry after the service is running.
+
+Usage: agentd daemon [OPTIONS]
+
+Options:
+      --config <CONFIG>
+          Load daemon configuration from this path [default: /etc/agentd/agentd.toml]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Examples:
+  agentd daemon
+  agentd daemon --config <PATH>
+"#;
+
 #[test]
-fn binary_wish_help_shows_evocative_intent_prompting_surface() {
-    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
-        .args(["wish", "--help"])
-        .output()
-        .expect("agentd binary should run");
-
-    assert!(
-        output.status.success(),
-        "wish help should exit successfully: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
-    assert!(
-        stdout.contains("--socket-path"),
-        "wish help should advertise socket override: {stdout}"
-    );
-    assert!(
-        stdout.contains("Elicit a wish and seed one governed session."),
-        "wish help should describe the wish session boundary exactly: {stdout}"
-    );
-    assert!(
-        stdout.contains("--progress <PROGRESS>")
-            && stdout.contains("summary")
-            && stdout.contains("full"),
-        "wish help should document live progress verbosity: {stdout}"
-    );
-    assert!(
-        stdout.contains(
-            "Live observation:\n  agentd wish streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.\n\nPrompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
-        ),
-        "wish help should document the exact prompt block: {stdout}"
-    );
+fn binary_daemon_help_matches_the_invocation_contract_exactly() {
+    assert_help(&["daemon", "--help"], DAEMON_HELP);
 }
 
+const RUN_HELP: &str = concat!(
+    r#"Submit one manual session request to an already-running agentd daemon.
+
+Invocation input may be omitted for an unseeded session or supplied as a work-unit reference, a prose intent statement, a complete artifact document, or a matching work-unit reference and work-unit artifact. Use run for direct manual submission; use wish for guided desired-state entry or daemon to start the service.
+
+Usage: agentd run [OPTIONS] <AGENT> [REPO]
+
+Arguments:
+  <AGENT>
+          Select an agent declared under this name in the daemon configuration
+
+  [REPO]
+          Use the selected agent's daemon-configured repository when omitted; otherwise clone a remote https://, http://, git://, ssh://, or user@host:path URL; local paths, credential-bearing URLs, queries, and fragments are rejected
+
+Options:
+      --socket-path <SOCKET_PATH>
+          Connect through this daemon control socket instead of resolving $XDG_RUNTIME_DIR/agentd/agentd.sock
+
+      --progress <PROGRESS>
+          Choose how much live transcript activity to print while the session runs
+
+          Possible values:
+          - summary: Print compact live transcript activity
+          - full:    Print raw live transcript event detail
+"#,
+    "          \n",
+    r#"          [default: summary]
+
+      --work-unit <WORK_UNIT>
+          Seed from this tracker work-unit reference through runa; when combined with an artifact, its type must be work-unit and its file stem must equal this reference; conflicts with --intent
+
+      --intent <INTENT>
+          Synthesize this prose statement into a canonical intent artifact; the active methodology must declare a compatible intent schema; conflicts with --work-unit and --artifact-file
+
+      --artifact-file <ARTIFACT_FILE>
+          Supply this complete UTF-8 JSON artifact document; its file stem becomes the artifact id and --artifact-type is required
+
+      --artifact-type <ARTIFACT_TYPE>
+          Declare the active methodology's artifact type for --artifact-file; use work-unit when combining with --work-unit
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Live observation:
+  agentd run streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.
+
+Examples:
+  agentd run <AGENT>
+  agentd run <AGENT> <REPO>
+  agentd run <AGENT> --intent <STATEMENT>
+  agentd run <AGENT> --work-unit <REFERENCE>
+  agentd run <AGENT> --artifact-type <TYPE> --artifact-file <ID>.json
+  agentd run <AGENT> --work-unit <REFERENCE> --artifact-type work-unit --artifact-file <REFERENCE>.json
+"#
+);
+
 #[test]
-fn binary_daemon_help_shows_config() {
-    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
-        .args(["daemon", "--help"])
-        .output()
-        .expect("agentd binary should run");
+fn binary_run_help_matches_the_invocation_contract_exactly() {
+    assert_help(&["run", "--help"], RUN_HELP);
+}
 
-    assert!(
-        output.status.success(),
-        "daemon help should exit successfully: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+const WISH_HELP: &str = concat!(
+    r#"Interactively elicit the state the operator wants made true and an optional target, validate the resulting canonical intent for the active methodology, and ask the running daemon to seed one agent session. With --work-unit, bypass prose elicitation and seed from the named tracker work unit.
 
-    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
-    assert!(
-        stdout.contains("--config"),
-        "daemon help should retain config loading: {stdout}"
-    );
+Use wish for guided desired-state entry. Use run for direct manual submission or daemon to start the service.
+
+Usage: agentd wish [OPTIONS] <AGENT> [REPO]
+
+Arguments:
+  <AGENT>
+          Select an agent declared under this name in the daemon configuration
+
+  [REPO]
+          Use the selected agent's daemon-configured repository when omitted; otherwise clone a remote https://, http://, git://, ssh://, or user@host:path URL; local paths, credential-bearing URLs, queries, and fragments are rejected
+
+Options:
+      --socket-path <SOCKET_PATH>
+          Connect through this daemon control socket instead of resolving $XDG_RUNTIME_DIR/agentd/agentd.sock
+
+      --work-unit <WORK_UNIT>
+          Bypass prose elicitation and seed from this existing tracker work-unit reference through runa
+
+      --progress <PROGRESS>
+          Choose how much live transcript activity to print while the session runs
+
+          Possible values:
+          - summary: Print compact live transcript activity
+          - full:    Print raw live transcript event detail
+"#,
+    "          \n",
+    r#"          [default: summary]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Live observation:
+  agentd wish streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.
+
+Prompts:
+  Speak a wish: the state you want made true.
+  What do you wish to be true?
+  What is this wish aimed at? Leave blank if it has no target.
+
+Examples:
+  agentd wish <AGENT>
+  agentd wish <AGENT> <REPO>
+  agentd wish <AGENT> --work-unit <REFERENCE>
+"#
+);
+
+#[test]
+fn binary_wish_help_matches_the_invocation_contract_exactly() {
+    assert_help(&["wish", "--help"], WISH_HELP);
 }
 
 #[test]
@@ -1699,32 +1783,5 @@ fn binary_wish_command_seeds_work_unit_arm_and_skips_prose_elicitation() {
         invocation.input, None,
         "wish work-unit arm should reach the same downstream request shape as `run --work-unit`: \
          a work-unit reference with no explicit invocation input"
-    );
-}
-
-#[test]
-fn binary_wish_help_advertises_work_unit_arm() {
-    let output = Command::new(env!("CARGO_BIN_EXE_agentd"))
-        .args(["wish", "--help"])
-        .output()
-        .expect("agentd binary should run");
-
-    assert!(
-        output.status.success(),
-        "wish help should exit successfully: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
-    assert!(
-        stdout.contains("--work-unit"),
-        "wish help should advertise the work-unit arm: {stdout}"
-    );
-    // The prose prompt surface remains documented unchanged.
-    assert!(
-        stdout.contains(
-            "Prompts:\n  Speak a wish: the state you want made true.\n  What do you wish to be true?\n  What is this wish aimed at? Leave blank if it has no target."
-        ),
-        "wish help should retain the exact prose prompt block: {stdout}"
     );
 }

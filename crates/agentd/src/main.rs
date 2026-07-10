@@ -5,37 +5,20 @@ use std::sync::atomic::AtomicBool;
 use std::{error::Error, fmt};
 use std::{io::BufRead, io::Write};
 
+mod cli;
+
 use agentd::config::Config;
 use agentd::{
-    LiveObservationLevel, RunRequest, RunnerSessionExecutor, configure_tracing,
-    request_run_with_live_observation, resolve_client_socket_path, run_daemon_until_shutdown,
+    RunRequest, RunnerSessionExecutor, configure_tracing, request_run_with_live_observation,
+    resolve_client_socket_path, run_daemon_until_shutdown,
 };
 use agentd_runner::InvocationInput;
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::Parser;
+use cli::{
+    Cli, Command, DEFAULT_CONFIG_PATH, ProgressLevel, WISH_GREETING, WISH_STATEMENT_PROMPT,
+    WISH_TARGET_PROMPT,
+};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
-
-const DEFAULT_CONFIG_PATH: &str = "/etc/agentd/agentd.toml";
-const WISH_GREETING: &str = "Speak a wish: the state you want made true.";
-const WISH_STATEMENT_PROMPT: &str = "What do you wish to be true?";
-const WISH_TARGET_PROMPT: &str = "What is this wish aimed at? Leave blank if it has no target.";
-const WISH_ABOUT: &str = "Elicit a wish and seed one governed session.";
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum ProgressLevel {
-    /// Print compact live transcript activity.
-    Summary,
-    /// Print raw live transcript event detail.
-    Full,
-}
-
-impl From<ProgressLevel> for LiveObservationLevel {
-    fn from(level: ProgressLevel) -> Self {
-        match level {
-            ProgressLevel::Summary => Self::Summary,
-            ProgressLevel::Full => Self::Full,
-        }
-    }
-}
 
 struct RunClientArgs {
     agent: String,
@@ -122,63 +105,6 @@ impl fmt::Display for RunCommandError {
 
 impl Error for RunCommandError {}
 
-#[derive(Parser, Debug)]
-#[command(name = "agentd", version, propagate_version = true)]
-struct Cli {
-    #[arg(long)]
-    config: Option<PathBuf>,
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(Args, Debug, Default)]
-struct DaemonArgs {
-    #[arg(long)]
-    config: Option<PathBuf>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Start the foreground daemon.
-    Daemon(DaemonArgs),
-    /// Trigger a manual session through the running daemon.
-    #[command(
-        display_name = "agentd",
-        after_help = "Live observation:\n  agentd run streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.\n\nWork-mode artifact invocation:\n  agentd run <AGENT> [REPO] --work-unit <ID> --artifact-type work-unit --artifact-file <ID>.json"
-    )]
-    Run {
-        agent: String,
-        repo: Option<String>,
-        #[arg(long)]
-        socket_path: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = ProgressLevel::Summary)]
-        progress: ProgressLevel,
-        #[arg(long, conflicts_with = "intent")]
-        work_unit: Option<String>,
-        #[arg(long, conflicts_with_all = ["work_unit", "artifact_file"])]
-        intent: Option<String>,
-        #[arg(long, requires = "artifact_type", conflicts_with = "intent")]
-        artifact_file: Option<PathBuf>,
-        #[arg(long, requires = "artifact_file")]
-        artifact_type: Option<String>,
-    },
-    #[command(
-        display_name = "agentd",
-        about = WISH_ABOUT,
-        after_help = wish_after_help()
-    )]
-    Wish {
-        agent: String,
-        repo: Option<String>,
-        #[arg(long)]
-        socket_path: Option<PathBuf>,
-        #[arg(long)]
-        work_unit: Option<String>,
-        #[arg(long, value_enum, default_value_t = ProgressLevel::Summary)]
-        progress: ProgressLevel,
-    },
-}
-
 fn main() -> ExitCode {
     if let Err(error) = configure_tracing() {
         eprintln!("failed to initialize tracing: {error}");
@@ -192,12 +118,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn wish_after_help() -> String {
-    format!(
-        "Live observation:\n  agentd wish streams compact followable transcript activity by default while the session executes. Use --progress full for raw transcript event detail.\n\nPrompts:\n  {WISH_GREETING}\n  {WISH_STATEMENT_PROMPT}\n  {WISH_TARGET_PROMPT}\n\nOr seed the session from an existing work-unit instead of prose:\n  agentd wish <AGENT> [REPO] --work-unit <ID>"
-    )
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {

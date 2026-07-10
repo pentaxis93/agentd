@@ -63,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Root, `daemon`, `run`, and `wish` command-local help now states each
+  command's effect and selection boundary, the purpose of every input, the
+  unseeded and supplied `run` modes, supported remote repository URL forms,
+  and the matching work-unit/artifact identity required by combined work mode.
+
 - `agentd run --work-unit` and `agentd wish --work-unit` now route the
   operator-supplied reference through runa's resolving entry by materializing a
   target-bearing intent seed and invoking unscoped `runa run`, instead of
