@@ -5,6 +5,7 @@
 //! configuration and starts the daemon.
 
 mod audit_root;
+pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod dispatch;

@@ -63,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Root, `daemon`, `run`, and `wish` `--help` now state each command's effect,
+  when to choose it, the purpose of every argument and option, and canonical
+  examples for non-obvious invocation modes. These command-local surfaces are
+  the authoritative invocation contract for operators and scripts.
+
 - `agentd run --work-unit` and `agentd wish --work-unit` now route the
   operator-supplied reference through runa's resolving entry by materializing a
   target-bearing intent seed and invoking unscoped `runa run`, instead of
