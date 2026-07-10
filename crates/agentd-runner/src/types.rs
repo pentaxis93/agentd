@@ -40,8 +40,17 @@ pub struct SessionSpec {
     /// stores each session under `<audit_root>/<agent>/<session_id>/`.
     pub audit_root: PathBuf,
     /// Active forge type exposed to the session as `GROUNDWORK_FORGE_TYPE` so
-    /// Groundwork can resolve forge-invariant operations.
+    /// Groundwork can resolve forge-invariant operations, and as
+    /// `RUNA_FORGE_TYPE` so runa's entry can bind a ticket reference.
     pub forge_type: String,
+    /// Forge account owning the deployment's repository, exposed to the
+    /// session as `RUNA_FORGE_OWNER`. Present exactly when
+    /// [`SessionSpec::forge_name`] is present.
+    pub forge_owner: Option<String>,
+    /// Repository name of the deployment on its forge, exposed to the session
+    /// as `RUNA_FORGE_NAME`. Present exactly when
+    /// [`SessionSpec::forge_owner`] is present.
+    pub forge_name: Option<String>,
     /// Additional host bind mounts declared by the selected agent.
     pub mounts: Vec<BindMount>,
     /// Command array executed directly from the cloned repository after
@@ -52,7 +61,8 @@ pub struct SessionSpec {
     /// Non-empty values are passed via ephemeral podman secrets; empty values
     /// are passed as direct `--env` assignments.
     /// Names reserved for runner-owned values such as `AGENT_NAME`,
-    /// `GROUNDWORK_FORGE_TYPE`, `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`,
+    /// `GROUNDWORK_FORGE_TYPE`, `RUNA_FORGE_TYPE`, `RUNA_FORGE_OWNER`,
+    /// `RUNA_FORGE_NAME`, `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`,
     /// `RUNA_TRANSCRIPT_DIR`, `RUNA_TRANSCRIPT_DEPLOYMENT`,
     /// `RUNA_TRANSCRIPT_RUN_ID`, and `RUNA_TRANSCRIPT_REDACT_ENV` are rejected
     /// during validation.

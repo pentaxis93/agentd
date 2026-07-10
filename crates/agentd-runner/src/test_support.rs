@@ -19,6 +19,8 @@ pub(crate) fn test_session_spec() -> SessionSpec {
         methodology_dir: PathBuf::from("/tmp/methodology"),
         audit_root: std::env::temp_dir().join("agentd-runner-test-audit-root"),
         forge_type: "github".to_string(),
+        forge_owner: None,
+        forge_name: None,
         mounts: Vec::new(),
         agent_command: vec!["site-builder".to_string(), "exec".to_string()],
         environment: Vec::new(),

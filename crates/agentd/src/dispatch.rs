@@ -181,6 +181,8 @@ pub fn dispatch_run_after_preflight(
                 methodology_dir: agent.methodology_dir().to_path_buf(),
                 audit_root,
                 forge_type: agent.forge_type().to_string(),
+                forge_owner: agent.forge_owner().map(str::to_string),
+                forge_name: agent.forge_name().map(str::to_string),
                 mounts: agent
                     .mounts()
                     .iter()

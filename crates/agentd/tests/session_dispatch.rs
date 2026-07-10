@@ -204,6 +204,42 @@ fn dispatch_run_forwards_active_forge_type_into_session_spec() {
 }
 
 #[test]
+fn dispatch_run_forwards_configured_forge_identity_into_session_spec() {
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+forge_owner = "tesserine"
+forge_name = "example-hello"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse");
+    let request = RunRequest {
+        agent: "site-builder".to_string(),
+        repo_url: Some("https://example.com/repo.git".to_string()),
+        work_unit: None,
+        input: None,
+    };
+    let (executor, state) = RecordingExecutor::succeeding(SessionOutcome::Success { exit_code: 0 });
+
+    dispatch_run(&config, &request, &executor).expect("dispatch should succeed");
+
+    let state = state.lock().expect("recording state should lock");
+    let spec = state
+        .last_spec
+        .as_ref()
+        .expect("executor should receive spec");
+
+    assert_eq!(spec.forge_owner.as_deref(), Some("tesserine"));
+    assert_eq!(spec.forge_name.as_deref(), Some("example-hello"));
+}
+
+#[test]
 fn dispatch_run_defaults_active_forge_type_to_github() {
     let config = Config::from_str(
         r#"
