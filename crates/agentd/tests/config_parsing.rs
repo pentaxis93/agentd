@@ -857,6 +857,100 @@ argv = ["site-builder", "exec"]
 }
 
 #[test]
+fn parses_agent_forge_owner_and_name_as_session_forge_identity() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("agent-forge-identity");
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+forge_owner = "tesserine"
+forge_name = "example-hello"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse forge identity");
+
+    let agent = config.agent("site-builder").expect("agent should exist");
+
+    assert_eq!(agent.forge_owner(), Some("tesserine"));
+    assert_eq!(agent.forge_name(), Some("example-hello"));
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+}
+
+#[test]
+fn omits_agent_forge_identity_when_both_fields_are_absent() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("agent-forge-identity-absent");
+    let config = Config::from_str(
+        r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#,
+    )
+    .expect("config should parse without a forge identity");
+
+    let agent = config.agent("site-builder").expect("agent should exist");
+
+    assert_eq!(agent.forge_owner(), None);
+    assert_eq!(agent.forge_name(), None);
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+}
+
+#[test]
+fn rejects_agent_declaring_only_one_half_of_the_forge_identity() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    set_xdg_runtime_dir("agent-forge-identity-partial");
+    for half in [
+        "forge_owner = \"tesserine\"",
+        "forge_name = \"example-hello\"",
+    ] {
+        let error = Config::from_str(&format!(
+            r#"
+[[agents]]
+name = "site-builder"
+base_image = "ghcr.io/example/site-builder:latest"
+methodology_dir = "../groundwork"
+{half}
+
+[agents.command]
+argv = ["site-builder", "exec"]
+"#
+        ))
+        .expect_err("a half-declared forge identity should be rejected");
+
+        match error {
+            ConfigError::PartialForgeIdentity { agent } => {
+                assert_eq!(agent, "site-builder");
+            }
+            other => panic!("expected PartialForgeIdentity, got {other:?}"),
+        }
+    }
+    unsafe {
+        std::env::remove_var("XDG_RUNTIME_DIR");
+    }
+}
+
+#[test]
 fn defaults_agent_forge_type_to_github_when_omitted() {
     let _guard = env_lock()
         .lock()

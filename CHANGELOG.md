@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 
+- Agent config carries the deployment's forge identity as `forge_owner` and
+  `forge_name`, injected into each session as `RUNA_FORGE_OWNER` and
+  `RUNA_FORGE_NAME` alongside `RUNA_FORGE_TYPE`, so a work-unit-seeded session
+  resolves its ticket reference against the configured forge identity. An agent
+  declares both fields or neither (#186).
 - `AGENTS.md` carries the canonical principles pointer
   (`pentaxis93/principles`), matching the runa/groundwork entry-line
   convention (#148).

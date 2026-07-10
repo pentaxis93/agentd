@@ -19,6 +19,9 @@ use std::path::Path;
 
 const AGENT_NAME_ENV: &str = "AGENT_NAME";
 const GROUNDWORK_FORGE_TYPE_ENV: &str = "GROUNDWORK_FORGE_TYPE";
+const RUNA_FORGE_TYPE_ENV: &str = "RUNA_FORGE_TYPE";
+const RUNA_FORGE_OWNER_ENV: &str = "RUNA_FORGE_OWNER";
+const RUNA_FORGE_NAME_ENV: &str = "RUNA_FORGE_NAME";
 const WORK_UNIT_ENV: &str = "AGENTD_WORK_UNIT";
 pub(crate) const REPO_TOKEN_ENV: &str = "AGENTD_REPO_TOKEN";
 pub(crate) const TRANSCRIPT_DIR_ENV: &str = "RUNA_TRANSCRIPT_DIR";
@@ -200,6 +203,7 @@ fn validate_work_mode_input(work_unit: &str, input: &InvocationInput) -> Result<
 ///
 /// Rejects names that are empty, contain `,` or `=`, or collide with
 /// runner-managed names such as `AGENT_NAME`, `GROUNDWORK_FORGE_TYPE`,
+/// `RUNA_FORGE_TYPE`, `RUNA_FORGE_OWNER`, `RUNA_FORGE_NAME`,
 /// `AGENTD_WORK_UNIT`, `AGENTD_REPO_TOKEN`, `RUNA_TRANSCRIPT_DIR`,
 /// `RUNA_TRANSCRIPT_DEPLOYMENT`, `RUNA_TRANSCRIPT_RUN_ID`, and
 /// `RUNA_TRANSCRIPT_REDACT_ENV`. Used both by
@@ -260,11 +264,27 @@ pub fn validate_repo_url(repo_url: &str) -> Result<(), RunnerError> {
 ///
 /// These names are reserved — callers cannot use them in
 /// [`SessionSpec::environment`] because the runner injects them directly.
-pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> [(&str, &str); 2] {
-    [
-        (AGENT_NAME_ENV, &spec.agent_name),
-        (GROUNDWORK_FORGE_TYPE_ENV, &spec.forge_type),
-    ]
+///
+/// The active forge type is exported under two names because two consumers
+/// read it: Groundwork resolves forge-invariant operations from
+/// `GROUNDWORK_FORGE_TYPE`, and runa's entry resolves the deployment's forge
+/// identity from the `RUNA_FORGE_*` atoms. Both derive from the single
+/// `forge_type` field. The owner and name atoms are emitted exactly when the
+/// agent configures a forge identity; runa owns the precedence that consumes
+/// them.
+pub(crate) fn runner_managed_environment(spec: &SessionSpec) -> Vec<(&str, &str)> {
+    let mut environment = vec![
+        (AGENT_NAME_ENV, spec.agent_name.as_str()),
+        (GROUNDWORK_FORGE_TYPE_ENV, spec.forge_type.as_str()),
+        (RUNA_FORGE_TYPE_ENV, spec.forge_type.as_str()),
+    ];
+    if let Some(owner) = spec.forge_owner.as_deref() {
+        environment.push((RUNA_FORGE_OWNER_ENV, owner));
+    }
+    if let Some(name) = spec.forge_name.as_deref() {
+        environment.push((RUNA_FORGE_NAME_ENV, name));
+    }
+    environment
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +423,9 @@ fn is_reserved_environment_name(name: &str) -> bool {
         name,
         AGENT_NAME_ENV
             | GROUNDWORK_FORGE_TYPE_ENV
+            | RUNA_FORGE_TYPE_ENV
+            | RUNA_FORGE_OWNER_ENV
+            | RUNA_FORGE_NAME_ENV
             | WORK_UNIT_ENV
             | REPO_TOKEN_ENV
             | TRANSCRIPT_DIR_ENV
@@ -519,6 +542,9 @@ mod tests {
         for reserved_name in [
             "AGENT_NAME",
             "GROUNDWORK_FORGE_TYPE",
+            "RUNA_FORGE_TYPE",
+            "RUNA_FORGE_OWNER",
+            "RUNA_FORGE_NAME",
             WORK_UNIT_ENV,
             REPO_TOKEN_ENV,
             "RUNA_TRANSCRIPT_DIR",
@@ -1699,6 +1725,69 @@ mod tests {
         assert!(
             matches!(error, RunnerError::InvalidAgentName),
             "expected InvalidAgentName, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn runner_managed_environment_exports_forge_type_to_both_consumers() {
+        let spec = SessionSpec {
+            forge_type: "sourcehut".to_string(),
+            ..test_session_spec()
+        };
+
+        let environment = runner_managed_environment(&spec);
+
+        assert_eq!(
+            environment
+                .iter()
+                .find(|(name, _)| *name == "GROUNDWORK_FORGE_TYPE")
+                .map(|(_, value)| *value),
+            Some("sourcehut")
+        );
+        assert_eq!(
+            environment
+                .iter()
+                .find(|(name, _)| *name == "RUNA_FORGE_TYPE")
+                .map(|(_, value)| *value),
+            Some("sourcehut")
+        );
+    }
+
+    #[test]
+    fn runner_managed_environment_exports_configured_forge_identity_atoms() {
+        let spec = SessionSpec {
+            forge_owner: Some("tesserine".to_string()),
+            forge_name: Some("example-hello".to_string()),
+            ..test_session_spec()
+        };
+
+        let environment = runner_managed_environment(&spec);
+
+        assert_eq!(
+            environment
+                .iter()
+                .find(|(name, _)| *name == "RUNA_FORGE_OWNER")
+                .map(|(_, value)| *value),
+            Some("tesserine")
+        );
+        assert_eq!(
+            environment
+                .iter()
+                .find(|(name, _)| *name == "RUNA_FORGE_NAME")
+                .map(|(_, value)| *value),
+            Some("example-hello")
+        );
+    }
+
+    #[test]
+    fn runner_managed_environment_omits_forge_identity_atoms_when_unconfigured() {
+        let spec = test_session_spec();
+        let environment = runner_managed_environment(&spec);
+
+        assert!(
+            !environment
+                .iter()
+                .any(|(name, _)| *name == "RUNA_FORGE_OWNER" || *name == "RUNA_FORGE_NAME")
         );
     }
 }

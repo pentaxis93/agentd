@@ -16,9 +16,14 @@ name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
-# Optional active forge type injected as GROUNDWORK_FORGE_TYPE for Groundwork.
-# Defaults to "github" when omitted.
+# Optional active forge type injected as GROUNDWORK_FORGE_TYPE for Groundwork and
+# as RUNA_FORGE_TYPE for runa. Defaults to "github" when omitted.
 #forge_type = "github"
+# Optional forge identity of the deployment's repository, injected as
+# RUNA_FORGE_OWNER and RUNA_FORGE_NAME so a work-unit-seeded session can bind a
+# ticket reference to its deployment. Declare both or neither.
+#forge_owner = "pentaxis93"
+#forge_name = "agentd"
 # Default repository URL cloned for manual runs when `agentd run` omits a repo,
 # and for each scheduled run of this agent.
 repo = "https://github.com/pentaxis93/agentd.git"

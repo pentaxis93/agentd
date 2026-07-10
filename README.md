@@ -86,9 +86,14 @@ name = "site-builder"
 base_image = "ghcr.io/example/site-builder:latest"
 # Methodology directory to mount read-only into the session environment.
 methodology_dir = "../groundwork"
-# Optional active forge type injected as GROUNDWORK_FORGE_TYPE for Groundwork.
-# Defaults to "github" when omitted.
+# Optional active forge type injected as GROUNDWORK_FORGE_TYPE for Groundwork and
+# as RUNA_FORGE_TYPE for runa. Defaults to "github" when omitted.
 #forge_type = "github"
+# Optional forge identity of the deployment's repository, injected as
+# RUNA_FORGE_OWNER and RUNA_FORGE_NAME so a work-unit-seeded session can bind a
+# ticket reference to its deployment. Declare both or neither.
+#forge_owner = "pentaxis93"
+#forge_name = "agentd"
 # Default repository URL cloned for manual runs when `agentd run` omits a repo,
 # and for every scheduled run of this agent. HTTPS, HTTP, git://, ssh://, and
 # user@host:path SSH forms are accepted.
@@ -155,8 +160,12 @@ must provide `/bin/sh`, `find`, `git`, `groupadd`, `useradd`, `gosu`, `runa`,
 and whatever binaries the declared agent command uses. SSH repository clone
 also requires an OpenSSH-compatible client in the base image. UID/GID `1000`
 must be available for the session user. The optional `forge_type` value declares one
-active forge type for each session and is injected as `GROUNDWORK_FORGE_TYPE`; when
-omitted, agentd injects `github`. When an agent declares `schedule`, it must
+active forge type for each session and is injected as both `GROUNDWORK_FORGE_TYPE`
+and `RUNA_FORGE_TYPE`; when omitted, agentd injects `github`. The optional
+`forge_owner` and `forge_name` values declare the deployment's forge identity and
+are injected as `RUNA_FORGE_OWNER` and `RUNA_FORGE_NAME`, letting a
+work-unit-seeded session bind its ticket reference to the deployment; an agent
+declares both or neither. When an agent declares `schedule`, it must
 also declare `repo`. Schedules are evaluated in daemon-local time and missed
 fires are not backfilled after downtime. Persistent audit records default to
 `$XDG_STATE_HOME/tesserine/audit` or `$HOME/.local/state/tesserine/audit`; set

@@ -148,6 +148,31 @@ impl Config {
                 None => DEFAULT_FORGE_TYPE.to_string(),
             };
 
+            let forge_owner = match raw_agent.forge_owner {
+                Some(value) => {
+                    validate_lookup_key(
+                        "forge_owner",
+                        &value,
+                        Some(raw_agent.name.as_str()),
+                        None,
+                    )?;
+                    Some(value)
+                }
+                None => None,
+            };
+            let forge_name = match raw_agent.forge_name {
+                Some(value) => {
+                    validate_lookup_key("forge_name", &value, Some(raw_agent.name.as_str()), None)?;
+                    Some(value)
+                }
+                None => None,
+            };
+            if forge_owner.is_some() != forge_name.is_some() {
+                return Err(ConfigError::PartialForgeIdentity {
+                    agent: raw_agent.name.clone(),
+                });
+            }
+
             if raw_agent.command.argv.is_empty() {
                 return Err(ConfigError::EmptyAgentCommand {
                     agent: raw_agent.name.clone(),
@@ -273,6 +298,8 @@ impl Config {
                 schedule,
                 repo_token_source,
                 forge_type,
+                forge_owner,
+                forge_name,
                 credentials,
                 agent_command,
             });
@@ -311,6 +338,8 @@ pub struct Agent {
     schedule: Option<String>,
     repo_token_source: Option<String>,
     forge_type: String,
+    forge_owner: Option<String>,
+    forge_name: Option<String>,
     credentials: Vec<CredentialConfig>,
     agent_command: Vec<String>,
 }
@@ -359,6 +388,20 @@ impl Agent {
     /// forge-operation resolution.
     pub fn forge_type(&self) -> &str {
         &self.forge_type
+    }
+
+    /// Forge account owning the deployment's repository. Present exactly when
+    /// [`Agent::forge_name`] is present; the pair is injected into each
+    /// launched session so runa's entry can bind a ticket reference to the
+    /// deployment's forge identity.
+    pub fn forge_owner(&self) -> Option<&str> {
+        self.forge_owner.as_deref()
+    }
+
+    /// Repository name of the deployment on its forge. Present exactly when
+    /// [`Agent::forge_owner`] is present.
+    pub fn forge_name(&self) -> Option<&str> {
+        self.forge_name.as_deref()
     }
 
     /// Declared credentials for this agent. Each credential's name is a
@@ -625,6 +668,10 @@ pub enum ConfigError {
     InvalidSchedule { agent: String, schedule: String },
     /// A scheduled agent must declare a default repo for autonomous runs.
     ScheduleRequiresRepo { agent: String },
+    /// An agent declares exactly one of `forge_owner` / `forge_name`. The
+    /// forge identity a session binds its ticket reference against is the
+    /// owner/name pair; half of it resolves no reference.
+    PartialForgeIdentity { agent: String },
     /// A configured mount source is not an absolute path.
     MountSourceMustBeAbsolute { agent: String, source: PathBuf },
     /// A configured mount target violates the runner's target rules.
@@ -746,6 +793,12 @@ impl fmt::Display for ConfigError {
                     "agent '{agent}' defines schedule but no repo; scheduled agents must define a repo"
                 )
             }
+            ConfigError::PartialForgeIdentity { agent } => {
+                write!(
+                    f,
+                    "agent '{agent}' defines only one of forge_owner and forge_name; a forge identity requires both"
+                )
+            }
             ConfigError::MountSourceMustBeAbsolute { agent, source } => {
                 write!(
                     f,
@@ -842,6 +895,8 @@ struct RawAgent {
     schedule: Option<String>,
     repo_token_source: Option<String>,
     forge_type: Option<String>,
+    forge_owner: Option<String>,
+    forge_name: Option<String>,
     #[serde(default)]
     credentials: Vec<RawCredentialConfig>,
 }
